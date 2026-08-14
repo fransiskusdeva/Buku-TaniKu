@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
   Plus, X, Wallet, TrendingUp, TrendingDown, Sprout, Settings2,
   Trash2, Pencil, ChevronLeft, ChevronRight, Users, Loader2, AlertCircle,
-  Package, Lock, ShoppingBag, Hammer, History, PiggyBank, AlertTriangle
+  Package, Lock, ShoppingBag, Hammer, History, PiggyBank, AlertTriangle,
+  Eye, EyeOff, LogOut
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -109,6 +110,49 @@ async function kvSet(key, value) {
   if (!res.ok) throw new Error("Gagal menyimpan data");
   return true;
 }
+
+// ---------- autentikasi (username unik + password sebagai kode akses) ----------
+
+async function hashPassword(username, password) {
+  const enc = new TextEncoder();
+  const data = enc.encode("buku-tani::" + username.toLowerCase() + "::" + password);
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function findUser(username) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/app_users?username=eq.${encodeURIComponent(username.toLowerCase())}&select=username,password_hash`,
+    { headers: SB_HEADERS }
+  );
+  if (!res.ok) throw new Error("Gagal cek akun");
+  const rows = await res.json();
+  return rows.length > 0 ? rows[0] : null;
+}
+
+async function createUser(username, password) {
+  const password_hash = await hashPassword(username, password);
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/app_users`, {
+    method: "POST",
+    headers: { ...SB_HEADERS, Prefer: "return=minimal" },
+    body: JSON.stringify([{ username: username.toLowerCase(), password_hash, last_active: new Date().toISOString() }]),
+  });
+  if (!res.ok) throw new Error("Gagal membuat akun");
+}
+
+async function touchActivity(username) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/app_users?username=eq.${encodeURIComponent(username.toLowerCase())}`, {
+      method: "PATCH",
+      headers: { ...SB_HEADERS, Prefer: "return=minimal" },
+      body: JSON.stringify({ last_active: new Date().toISOString() }),
+    });
+  } catch (e) {
+    // gagal update jejak aktivitas bukan hal fatal, biarkan
+  }
+}
+
+const LS_SESSION_KEY = "buku-tani-session";
 
 // polling ringan tiap 12 detik biar device lain ikut keupdate tanpa refresh manual
 const POLL_INTERVAL_MS = 12000;
@@ -305,20 +349,170 @@ function PetakTile({ label, net, active, onClick, isGlobal }) {
           color: active ? (positive ? "#B7D89A" : "#E8B4A4") : (positive ? GREEN : RUST),
           fontWeight: 600,
         }}>
-          {positive ? "+" : ""}{rupiah(net)}
+          {positive ? "+" : ""}<Amt>{rupiah(net)}</Amt>
         </span>
       )}
     </button>
   );
 }
 
+// ---------- sensor nilai (blur) ----------
+
+const BlurContext = React.createContext(false);
+function useBlur() { return React.useContext(BlurContext); }
+function Amt({ children, style }) {
+  const hide = useBlur();
+  return (
+    <span style={hide ? { ...style, filter: "blur(7px)", userSelect: "none", transition: "filter .15s" } : style}>
+      {children}
+    </span>
+  );
+}
+
+// ---------- Login ----------
+
+function LoginScreen({ onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [confirmingNew, setConfirmingNew] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError("");
+    const uname = username.trim();
+    if (!uname || !password) { setError("Isi username dan password dulu ya."); return; }
+    setLoading(true);
+    try {
+      const existing = await findUser(uname);
+      if (existing) {
+        const hash = await hashPassword(uname, password);
+        if (hash === existing.password_hash) {
+          await touchActivity(uname);
+          onLogin(uname);
+        } else {
+          setError("Password salah.");
+        }
+      } else {
+        setConfirmingNew(true);
+      }
+    } catch (e) {
+      setError("Gagal terhubung. Cek koneksi internet lalu coba lagi.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleCreateNew() {
+    setLoading(true);
+    setError("");
+    try {
+      await createUser(username.trim(), password);
+      onLogin(username.trim());
+    } catch (e) {
+      setError("Gagal membuat akun. Coba lagi.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: BASE, display: "flex", alignItems: "center",
+      justifyContent: "center", padding: 20, fontFamily: "'Public Sans', sans-serif",
+    }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Public+Sans:wght@400;500;600;700&display=swap');
+        * { box-sizing: border-box; }
+      `}</style>
+      <div style={{
+        width: "100%", maxWidth: 380, background: "#FBF9F1", borderRadius: 20,
+        padding: "32px 26px", boxShadow: "0 10px 30px rgba(31,46,29,0.15)", border: "1px solid rgba(31,46,29,0.08)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 22 }}>
+          <div style={{
+            width: 44, height: 44, borderRadius: 12, background: FOREST,
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            <Sprout size={22} color={GOLD} />
+          </div>
+          <div>
+            <h1 style={{ margin: 0, fontFamily: "'Fraunces', serif", fontSize: 22, color: FOREST }}>Buku Tani</h1>
+            <span style={{ fontSize: 12.5, color: "#8A8A78" }}>Masuk pakai username & password</span>
+          </div>
+        </div>
+
+        {!confirmingNew ? (
+          <form onSubmit={handleSubmit}>
+            <div style={{ marginBottom: 14 }}>
+              <FieldLabel>Username</FieldLabel>
+              <input
+                style={inputStyle} value={username} autoCapitalize="none" autoCorrect="off"
+                onChange={(e) => setUsername(e.target.value)} placeholder="mis. usahatani-budi"
+              />
+            </div>
+            <div style={{ marginBottom: 18 }}>
+              <FieldLabel>Password</FieldLabel>
+              <input
+                style={inputStyle} type="password" value={password}
+                onChange={(e) => setPassword(e.target.value)} placeholder="kode akses kamu"
+              />
+            </div>
+            {error && <p style={{ color: RUST, fontSize: 13, margin: "0 0 14px" }}>{error}</p>}
+            <PrimaryBtn onClick={handleSubmit} style={{ width: "100%", justifyContent: "center" }}>
+              {loading ? "Memeriksa..." : "Masuk"}
+            </PrimaryBtn>
+            <p style={{ fontSize: 12, color: "#8A8A78", marginTop: 14, textAlign: "center" }}>
+              Username belum ada? Isi aja bebas — nanti ditawarin buat buku baru otomatis.
+            </p>
+          </form>
+        ) : (
+          <div>
+            <p style={{ fontSize: 14, color: "#3A3A2E", marginBottom: 18 }}>
+              Username <b>{username}</b> belum ada. Mau buat buku baru dengan username & password ini?
+            </p>
+            {error && <p style={{ color: RUST, fontSize: 13, margin: "0 0 14px" }}>{error}</p>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <PrimaryBtn onClick={handleCreateNew} style={{ flex: 1, justifyContent: "center" }}>
+                {loading ? "Membuat..." : "Ya, Buat Buku Baru"}
+              </PrimaryBtn>
+              <button
+                onClick={() => { setConfirmingNew(false); setError(""); }}
+                style={{
+                  padding: "10px 16px", borderRadius: 12, border: "1px solid rgba(31,46,29,0.2)",
+                  background: "#fff", cursor: "pointer", fontSize: 14, fontWeight: 600, color: "#5A5A4A",
+                }}
+              >
+                Batal
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ---------- Main App ----------
 
-export default function BukuTani() {
-  const [lahanList, setLahanList, lahanLoaded] = useSharedState("lahan-list", []);
-  const [categories, setCategories, catLoaded] = useSharedState("category-list", DEFAULT_CATEGORIES);
-  const [transactions, setTransactions, txLoaded, txError] = useSharedState("transactions", []);
-  const [stokPupuk, setStokPupuk, stokLoaded] = useSharedState("stok-pupuk", []);
+function Dashboard({ username, onLogout }) {
+  const key = (k) => `${username}:${k}`;
+  const [lahanList, setLahanList, lahanLoaded] = useSharedState(key("lahan-list"), []);
+  const [categories, setCategories, catLoaded] = useSharedState(key("category-list"), DEFAULT_CATEGORIES);
+  const [transactions, setTransactions, txLoaded, txError] = useSharedState(key("transactions"), []);
+  const [stokPupuk, setStokPupuk, stokLoaded] = useSharedState(key("stok-pupuk"), []);
+  const [hideAmounts, setHideAmounts] = useState(() => localStorage.getItem("buku-tani-hide") === "1");
+
+  useEffect(() => {
+    localStorage.setItem("buku-tani-hide", hideAmounts ? "1" : "0");
+  }, [hideAmounts]);
+
+  useEffect(() => {
+    touchActivity(username);
+    const interval = setInterval(() => touchActivity(username), 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [username]);
 
   const [selectedLahan, setSelectedLahan] = useState("all"); // 'all' or lahan id
   const [showTxModal, setShowTxModal] = useState(false);
@@ -598,6 +792,7 @@ export default function BukuTani() {
   }
 
   return (
+    <BlurContext.Provider value={hideAmounts}>
     <div style={{
       minHeight: "100vh", background: BASE, color: INK,
       fontFamily: "'Public Sans', sans-serif",
@@ -632,6 +827,9 @@ export default function BukuTani() {
               </div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
+              <IconBtn onClick={() => setHideAmounts((v) => !v)} title={hideAmounts ? "Tampilkan nilai" : "Sensor nilai"}>
+                {hideAmounts ? <EyeOff size={16} /> : <Eye size={16} />}
+              </IconBtn>
               <IconBtn onClick={() => setShowRecordModal(true)} title="Record bulanan/tahunan">
                 <History size={16} />
               </IconBtn>
@@ -640,6 +838,9 @@ export default function BukuTani() {
               </IconBtn>
               <IconBtn onClick={() => setShowCatModal(true)} title="Kelola kategori">
                 <Settings2 size={16} />
+              </IconBtn>
+              <IconBtn onClick={onLogout} title="Keluar akun">
+                <LogOut size={16} />
               </IconBtn>
             </div>
           </div>
@@ -651,7 +852,7 @@ export default function BukuTani() {
             <PiggyBank size={14} color={GOLD} />
             <span style={{ fontSize: 12, opacity: 0.85 }}>Saldo Kas</span>
             <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13.5, fontWeight: 700, color: GOLD }}>
-              {rupiah(saldoKas)}
+              <Amt>{rupiah(saldoKas)}</Amt>
             </span>
           </div>
 
@@ -664,7 +865,7 @@ export default function BukuTani() {
             fontFamily: "'JetBrains Mono', monospace", fontSize: 34, fontWeight: 700,
             color: totals.net >= 0 ? "#BFE3A0" : "#F0B7A4",
           }}>
-            {totals.net >= 0 ? "" : "-"}{rupiah(Math.abs(totals.net))}
+            <Amt>{totals.net >= 0 ? "" : "-"}{rupiah(Math.abs(totals.net))}</Amt>
           </div>
 
           {txError && (
@@ -744,13 +945,13 @@ export default function BukuTani() {
             <h3 style={{ margin: "0 0 14px", fontFamily: "'Fraunces', serif", fontSize: 16, color: FOREST }}>
               Pengeluaran per Kategori
             </h3>
-            <ResponsiveContainer width="100%" height={220}>
+            <ResponsiveContainer key={`pie-${selectedLahan}`} width="100%" height={220}>
               <PieChart>
                 <Pie data={chartData} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={chartData.length > 1 ? 2 : 0} isAnimationActive={false}>
-                  {chartData.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                  {chartData.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} stroke="none" />)}
                 </Pie>
                 <Tooltip formatter={(v) => rupiah(v)} contentStyle={{ fontFamily: "'Public Sans', sans-serif", borderRadius: 8, border: "1px solid rgba(31,46,29,0.15)" }} />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Legend iconType="circle" layout="horizontal" verticalAlign="bottom" align="center" wrapperStyle={{ fontSize: 12 }} />
               </PieChart>
             </ResponsiveContainer>
           </div>
@@ -761,15 +962,15 @@ export default function BukuTani() {
             <h3 style={{ margin: "0 0 14px", fontFamily: "'Fraunces', serif", fontSize: 16, color: FOREST }}>
               Perbandingan Antar Lahan
             </h3>
-            <ResponsiveContainer width="100%" height={220}>
+            <ResponsiveContainer key="bar-compare" width="100%" height={220}>
               <BarChart data={lahanCompareData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(31,46,29,0.1)" />
                 <XAxis dataKey="name" tick={{ fontSize: 11 }} />
                 <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => (v >= 1000000 ? `${v / 1000000}jt` : v)} />
                 <Tooltip formatter={(v) => rupiah(v)} contentStyle={{ fontFamily: "'Public Sans', sans-serif", borderRadius: 8, border: "1px solid rgba(31,46,29,0.15)" }} />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="Pemasukan" fill={GREEN} radius={[4, 4, 0, 0]} />
-                <Bar dataKey="Pengeluaran" fill={RUST} radius={[4, 4, 0, 0]} />
+                <Legend iconType="circle" layout="horizontal" verticalAlign="bottom" align="center" wrapperStyle={{ fontSize: 12 }} />
+                <Bar dataKey="Pemasukan" fill={GREEN} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                <Bar dataKey="Pengeluaran" fill={RUST} radius={[4, 4, 0, 0]} isAnimationActive={false} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -819,7 +1020,7 @@ export default function BukuTani() {
                     fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14.5,
                     color: t.type === "income" ? GREEN : RUST, whiteSpace: "nowrap",
                   }}>
-                    {t.type === "income" ? "+" : "-"}{rupiah(t.amount)}
+                    {t.type === "income" ? "+" : "-"}<Amt>{rupiah(t.amount)}</Amt>
                   </span>
                   <IconBtn onClick={() => openEditFor(t)} title="Edit"><Pencil size={14} /></IconBtn>
                   <IconBtn onClick={() => requestDeleteTx(t.id)} title="Hapus" danger><Trash2 size={14} /></IconBtn>
@@ -938,6 +1139,7 @@ export default function BukuTani() {
         />
       )}
     </div>
+    </BlurContext.Provider>
   );
 }
 
@@ -978,7 +1180,7 @@ function SummaryCard({ icon, label, value, color, onAdd }) {
         )}
       </div>
       <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, fontWeight: 700, color }}>
-        {rupiah(value)}
+        <Amt>{rupiah(value)}</Amt>
       </div>
     </div>
   );
@@ -1558,7 +1760,7 @@ function RecordModal({ onClose, transactions, lahanList, catMap }) {
                     fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 13.5,
                     color: t.type === "income" ? GREEN : RUST,
                   }}>
-                    {t.type === "income" ? "+" : "-"}{rupiah(t.amount)}
+                    {t.type === "income" ? "+" : "-"}<Amt>{rupiah(t.amount)}</Amt>
                   </span>
                 </div>
               ))}
@@ -1598,20 +1800,20 @@ function RecordModal({ onClose, transactions, lahanList, catMap }) {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 10, marginBottom: 14 }}>
             <div style={{ background: CARD, borderRadius: 12, padding: "10px 12px" }}>
               <div style={{ fontSize: 11, color: "#5A5A4A", fontWeight: 600, textTransform: "uppercase" }}>Pemasukan</div>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: GREEN, fontSize: 15 }}>{rupiah(recap.pemasukan)}</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: GREEN, fontSize: 15 }}><Amt>{rupiah(recap.pemasukan)}</Amt></div>
             </div>
             <div style={{ background: CARD, borderRadius: 12, padding: "10px 12px" }}>
               <div style={{ fontSize: 11, color: "#5A5A4A", fontWeight: 600, textTransform: "uppercase" }}>Pengeluaran (Kas)</div>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: RUST, fontSize: 15 }}>{rupiah(recap.pengeluaranKas)}</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: RUST, fontSize: 15 }}><Amt>{rupiah(recap.pengeluaranKas)}</Amt></div>
             </div>
             <div style={{ background: CARD, borderRadius: 12, padding: "10px 12px" }}>
               <div style={{ fontSize: 11, color: "#5A5A4A", fontWeight: 600, textTransform: "uppercase" }}>Net Operasional</div>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: recap.net >= 0 ? GREEN : RUST, fontSize: 15 }}>{rupiah(recap.net)}</div>
+              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: recap.net >= 0 ? GREEN : RUST, fontSize: 15 }}><Amt>{rupiah(recap.net)}</Amt></div>
             </div>
           </div>
           {recap.inputSaldo > 0 && (
             <p style={{ fontSize: 12, color: "#8A8A78", margin: "0 0 16px" }}>
-              + Input Saldo periode ini: {rupiah(recap.inputSaldo)} (di luar Pemasukan di atas)
+              + Input Saldo periode ini: <Amt>{rupiah(recap.inputSaldo)}</Amt> (di luar Pemasukan di atas)
             </p>
           )}
 
@@ -1639,7 +1841,7 @@ function RecordModal({ onClose, transactions, lahanList, catMap }) {
                       fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 13.5,
                       color: row.net >= 0 ? GREEN : RUST,
                     }}>
-                      {row.net >= 0 ? "+" : ""}{rupiah(row.net)}
+                      {row.net >= 0 ? "+" : ""}<Amt>{rupiah(row.net)}</Amt>
                     </span>
                     <ChevronRight size={15} color="#8A8A78" />
                   </div>
@@ -1651,4 +1853,27 @@ function RecordModal({ onClose, transactions, lahanList, catMap }) {
       )}
     </Modal>
   );
+}
+
+// ---------- Root: kelola sesi login ----------
+
+export default function App() {
+  const [username, setUsername] = useState(() => {
+    try { return localStorage.getItem(LS_SESSION_KEY) || null; } catch (e) { return null; }
+  });
+
+  function handleLogin(u) {
+    try { localStorage.setItem(LS_SESSION_KEY, u); } catch (e) {}
+    setUsername(u);
+  }
+
+  function handleLogout() {
+    try { localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
+    setUsername(null);
+  }
+
+  if (!username) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+  return <Dashboard username={username} onLogout={handleLogout} />;
 }
