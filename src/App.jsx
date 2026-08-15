@@ -381,7 +381,7 @@ function LoginScreen({ onLogin }) {
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
-    const uname = username.trim();
+    const uname = username.trim().toLowerCase();
     if (!uname || !password) { setError("Isi username dan password dulu ya."); return; }
     setLoading(true);
     try {
@@ -407,9 +407,10 @@ function LoginScreen({ onLogin }) {
   async function handleCreateNew() {
     setLoading(true);
     setError("");
+    const uname = username.trim().toLowerCase();
     try {
-      await createUser(username.trim(), password);
-      onLogin(username.trim());
+      await createUser(uname, password);
+      onLogin(uname);
     } catch (e) {
       setError("Gagal membuat akun. Coba lagi.");
     } finally {
