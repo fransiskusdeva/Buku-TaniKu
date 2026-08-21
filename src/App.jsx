@@ -1073,6 +1073,24 @@ function Dashboard({ username, onLogout }) {
         />
       )}
 
+      {showLahanModal && (
+        <LahanModal
+          onClose={() => setShowLahanModal(false)}
+          lahanList={lahanList}
+          onSave={saveLahan}
+          onDelete={deleteLahan}
+        />
+      )}
+
+      {showCatModal && (
+        <CategoryModal
+          onClose={() => setShowCatModal(false)}
+          categories={categories}
+          onSave={saveCategory}
+          onDelete={deleteCategory}
+        />
+      )}
+
       {showStokModal && (
         <StokModal 
           onClose={() => setShowStokModal(false)} 
@@ -1095,28 +1113,6 @@ function Dashboard({ username, onLogout }) {
             setConfirmDeletePupuk(null);
           }}
           onCancel={() => setConfirmDeletePupuk(null)}
-        />
-      )}
-
-      {showCatModal && (
-        <CategoryModal
-          onClose={() => setShowCatModal(false)}
-          categories={categories}
-          onSave={saveCategory}
-          onDelete={deleteCategory}
-        />
-      )}
-
-      {showStokModal && (
-        <StokModal 
-          onClose={() => setShowStokModal(false)} 
-          stokPupuk={stokPupuk} 
-          onAddJenis={addPupukJenis}
-          onDeletePupuk={async (id) => {
-            if (window.confirm(`Hapus jenis pupuk ini?`)) {
-              await setStokPupuk(stokPupuk.filter(s => s.id !== id));
-            }
-          }}
         />
       )}
 
