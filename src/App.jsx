@@ -528,7 +528,8 @@ function Dashboard({ username, onLogout }) {
   const [showFabMenu, setShowFabMenu] = useState(false);
   const [editingTx, setEditingTx] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
-
+  const [confirmDeletePupuk, setConfirmDeletePupuk] = useState(null);
+  
   const ready = lahanLoaded && catLoaded && txLoaded && stokLoaded;
 
   // seed default categories only after load confirms empty AND catLoaded true and no existing write happened
@@ -1072,12 +1073,28 @@ function Dashboard({ username, onLogout }) {
         />
       )}
 
-      {showLahanModal && (
-        <LahanModal
-          onClose={() => setShowLahanModal(false)}
-          lahanList={lahanList}
-          onSave={saveLahan}
-          onDelete={deleteLahan}
+      {showStokModal && (
+        <StokModal 
+          onClose={() => setShowStokModal(false)} 
+          stokPupuk={stokPupuk} 
+          onAddJenis={addPupukJenis}
+          onDeletePupuk={(id) => {
+            // Set state untuk confirm modal
+            setConfirmDeletePupuk(id);
+          }}
+        />
+      )}
+
+      {/* Confirm Modal untuk hapus pupuk */}
+      {confirmDeletePupuk && (
+        <ConfirmModal
+          title="Hapus Jenis Pupuk?"
+          message={`Yakin mau hapus pupuk ini? Transaksi yang sudah pakai pupuk ini tetap tersimpan.`}
+          onConfirm={async () => {
+            await setStokPupuk(stokPupuk.filter(s => s.id !== confirmDeletePupuk));
+            setConfirmDeletePupuk(null);
+          }}
+          onCancel={() => setConfirmDeletePupuk(null)}
         />
       )}
 
@@ -1455,33 +1472,34 @@ function StokModal({ onClose, stokPupuk, onAddJenis, onDeletePupuk }) {
         )}
         {stokPupuk.map((s) => (
           <div key={s.id} style={{
-             background: "#fff", borderRadius: 10, padding: "10px 12px", border: "1px solid rgba(31,46,29,0.08)",
-             display: "flex", justifyContent: "space-between", alignItems: "center",
+            background: "#fff", borderRadius: 10, padding: "10px 12px", border: "1px solid rgba(31,46,29,0.08)",
+            display: "flex", justifyContent: "space-between", alignItems: "center",
           }}>
-           <div>
-             <div style={{ fontWeight: 600, fontSize: 14 }}>{s.nama}</div>
-             <div style={{ fontSize: 12, color: "#8A8A78" }}>           {s.hargaPerKg > 0 ? `Rata-rata ${rupiah(s.hargaPerKg)}/kg` : "Belum ada harga"}
-          </div>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ textAlign: "right" }}>
-            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14.5, color: s.stokKg > 0 ? GREEN : "#B0AC9A" }}>
-              {s.stokKg} kg
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{s.nama}</div>
+              <div style={{ fontSize: 12, color: "#8A8A78" }}>
+                {s.hargaPerKg > 0 ? `Rata-rata ${rupiah(s.hargaPerKg)}/kg` : "Belum ada harga"}
+              </div>
+           </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14.5, color: s.stokKg > 0 ? GREEN : "#B0AC9A" }}>
+                  {s.stokKg} kg
+                </div>
+                <div style={{ fontSize: 11.5, color: "#8A8A78" }}>{rupiah(s.stokKg * s.hargaPerKg)}</div>
+              </div>
+              {s.stokKg === 0 && onDeletePupuk && (
+                <IconBtn 
+                  onClick={() => onDeletePupuk(s.id)} 
+                  title="Hapus pupuk (stok 0)" 
+                  danger
+                >
+                  <Trash2 size={14} />
+                </IconBtn>
+              )}
             </div>
-            <div style={{ fontSize: 11.5, color: "#8A8A78" }}>{rupiah(s.stokKg * s.hargaPerKg)}</div>
           </div>
-          {s.stokKg === 0 && onDeletePupuk && (
-            <IconBtn 
-              onClick={() => onDeletePupuk(s.id)} 
-              title="Hapus pupuk (stok 0)" 
-              danger
-            >
-          <Trash2 size={14} />
-        </IconBtn>
-       )}
-     </div>
-   </div>
- ))}
+        ))}
       </div>
 
       <div style={{ borderTop: "1px solid rgba(31,46,29,0.1)", paddingTop: 14 }}>
