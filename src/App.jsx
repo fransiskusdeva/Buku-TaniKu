@@ -1510,10 +1510,36 @@ function BeliPupukModal({ onClose, stokPupuk, onSave, initial }) {
             <select style={inputStyle} value={pupukId} onChange={(e) => setPupukId(e.target.value)}>
               {stokPupuk.map((s) => <option key={s.id} value={s.id}>{s.nama}</option>)}
             </select>
-            <button onClick={() => setAddingNew(true)} style={{
-              marginTop: 6, background: "none", border: "none", color: GREEN, fontSize: 12.5,
-              fontWeight: 600, cursor: "pointer", padding: 0,
-            }}>+ Tambah jenis baru</button>
+            <button 
+  onClick={() => setAddingNew(true)} 
+  style={{
+    marginTop: 8,
+    padding: "10px 14px",
+    borderRadius: 10,
+    border: "2px dashed #4C6B3D",
+    background: "#F5FAF0",
+    color: "#4C6B3D",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    transition: "all 0.2s"
+  }}
+  onMouseEnter={(e) => {
+    e.currentTarget.style.background = "#E8F5DE";
+    e.currentTarget.style.transform = "scale(1.01)";
+  }}
+  onMouseLeave={(e) => {
+    e.currentTarget.style.background = "#F5FAF0";
+    e.currentTarget.style.transform = "scale(1)";
+  }}
+>
+  <Plus size={16} /> Tambah jenis pupuk baru
+</button>
           </>
         ) : (
           <>
