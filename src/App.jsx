@@ -1091,7 +1091,16 @@ function Dashboard({ username, onLogout }) {
       )}
 
       {showStokModal && (
-        <StokModal onClose={() => setShowStokModal(false)} stokPupuk={stokPupuk} onAddJenis={addPupukJenis} />
+        <StokModal 
+          onClose={() => setShowStokModal(false)} 
+          stokPupuk={stokPupuk} 
+          onAddJenis={addPupukJenis}
+          onDeletePupuk={async (id) => {
+            if (window.confirm(`Hapus jenis pupuk ini?`)) {
+              await setStokPupuk(stokPupuk.filter(s => s.id !== id));
+            }
+          }}
+        />
       )}
 
       {showBeliModal && (
@@ -1418,7 +1427,7 @@ function CategoryModal({ onClose, categories, onSave, onDelete }) {
   );
 }
 
-function StokModal({ onClose, stokPupuk, onAddJenis }) {
+function StokModal({ onClose, stokPupuk, onAddJenis, onDeletePupuk }) {
   const [newName, setNewName] = useState("");
   const totalNilai = stokPupuk.reduce((s, i) => s + i.stokKg * i.hargaPerKg, 0);
 
@@ -1446,23 +1455,33 @@ function StokModal({ onClose, stokPupuk, onAddJenis }) {
         )}
         {stokPupuk.map((s) => (
           <div key={s.id} style={{
-            background: "#fff", borderRadius: 10, padding: "10px 12px", border: "1px solid rgba(31,46,29,0.08)",
-            display: "flex", justifyContent: "space-between", alignItems: "center",
+             background: "#fff", borderRadius: 10, padding: "10px 12px", border: "1px solid rgba(31,46,29,0.08)",
+             display: "flex", justifyContent: "space-between", alignItems: "center",
           }}>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 14 }}>{s.nama}</div>
-              <div style={{ fontSize: 12, color: "#8A8A78" }}>
-                {s.hargaPerKg > 0 ? `Rata-rata ${rupiah(s.hargaPerKg)}/kg` : "Belum ada harga"}
-              </div>
-            </div>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14.5, color: s.stokKg > 0 ? GREEN : "#B0AC9A" }}>
-                {s.stokKg} kg
-              </div>
-              <div style={{ fontSize: 11.5, color: "#8A8A78" }}>{rupiah(s.stokKg * s.hargaPerKg)}</div>
-            </div>
+           <div>
+             <div style={{ fontWeight: 600, fontSize: 14 }}>{s.nama}</div>
+             <div style={{ fontSize: 12, color: "#8A8A78" }}>           {s.hargaPerKg > 0 ? `Rata-rata ${rupiah(s.hargaPerKg)}/kg` : "Belum ada harga"}
           </div>
-        ))}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14.5, color: s.stokKg > 0 ? GREEN : "#B0AC9A" }}>
+              {s.stokKg} kg
+            </div>
+            <div style={{ fontSize: 11.5, color: "#8A8A78" }}>{rupiah(s.stokKg * s.hargaPerKg)}</div>
+          </div>
+          {s.stokKg === 0 && onDeletePupuk && (
+            <IconBtn 
+              onClick={() => onDeletePupuk(s.id)} 
+              title="Hapus pupuk (stok 0)" 
+              danger
+            >
+          <Trash2 size={14} />
+        </IconBtn>
+       )}
+     </div>
+   </div>
+ ))}
       </div>
 
       <div style={{ borderTop: "1px solid rgba(31,46,29,0.1)", paddingTop: 14 }}>
