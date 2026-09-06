@@ -622,6 +622,24 @@ function Dashboard({ username, onLogout }) {
   const [selectedLahan, setSelectedLahan] = useState("all"); // 'all' or lahan id
   const [dashPage, setDashPage] = useState(0); // 0 = dashboard, 1 = riwayat transaksi
   const touchStartXRef = React.useRef(null);
+  const page1Ref = React.useRef(null);
+  const page2Ref = React.useRef(null);
+  const [pageHeight, setPageHeight] = useState(null);
+
+  useEffect(() => {
+    const el1 = page1Ref.current, el2 = page2Ref.current;
+    if (!el1 || !el2) return;
+    const update = () => {
+      const active = dashPage === 0 ? el1 : el2;
+      setPageHeight(active.scrollHeight);
+    };
+    update();
+    const ro1 = new ResizeObserver(update);
+    const ro2 = new ResizeObserver(update);
+    ro1.observe(el1);
+    ro2.observe(el2);
+    return () => { ro1.disconnect(); ro2.disconnect(); };
+  }, [dashPage]);
 
   function handleSwipeStart(e) {
     touchStartXRef.current = e.touches[0].clientX;
@@ -1205,14 +1223,18 @@ function Dashboard({ username, onLogout }) {
         )}
 
         {lahanList.length > 0 && (
-          <div onTouchStart={handleSwipeStart} onTouchEnd={handleSwipeEnd} style={{ overflow: "hidden" }}>
+          <div
+            onTouchStart={handleSwipeStart}
+            onTouchEnd={handleSwipeEnd}
+            style={{ overflow: "hidden", height: pageHeight ? `${pageHeight}px` : "auto", transition: "height .25s ease" }}
+          >
             <div style={{
-              display: "flex", width: "200%",
+              display: "flex", width: "200%", alignItems: "flex-start",
               transform: `translateX(${dashPage === 0 ? "0%" : "-50%"})`,
               transition: "transform .25s ease",
             }}>
               {/* Halaman 1: Dashboard */}
-              <div style={{ width: "50%", flexShrink: 0, boxSizing: "border-box", padding: "0 20px" }}>
+              <div ref={page1Ref} style={{ width: "50%", flexShrink: 0, boxSizing: "border-box", padding: "0 20px" }}>
                 {/* Summary cards */}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 8 }}>
                   <SummaryCard icon={<TrendingUp size={16} color={GREEN} />} label="Pemasukan" value={totals.income} color={GREEN}
@@ -1280,7 +1302,7 @@ function Dashboard({ username, onLogout }) {
               </div>
 
               {/* Halaman 2: Riwayat Transaksi */}
-              <div style={{ width: "50%", flexShrink: 0, boxSizing: "border-box", padding: "0 20px" }}>
+              <div ref={page2Ref} style={{ width: "50%", flexShrink: 0, boxSizing: "border-box", padding: "0 20px" }}>
                 <button
                   onClick={() => setDashPage(0)}
                   style={{
