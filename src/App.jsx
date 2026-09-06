@@ -3,7 +3,7 @@ import {
   Plus, X, Wallet, TrendingUp, TrendingDown, Sprout, Settings2,
   Trash2, Pencil, ChevronLeft, ChevronRight, Users, Loader2, AlertCircle,
   Package, Lock, ShoppingBag, Hammer, History, PiggyBank, AlertTriangle,
-  Eye, EyeOff, LogOut
+  Eye, EyeOff, LogOut, RotateCcw, Landmark
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -15,12 +15,14 @@ import {
 const CAT_BELI_PUPUK = "c-beli-pupuk";
 const CAT_PEMUPUKAN = "c-pemupukan";
 const CAT_SALDO = "c-saldo";
+const CAT_SEWA_LAHAN = "c-sewa-lahan";
+const CAT_PENGEMBALIAN_SEWA = "c-pengembalian-sewa";
 
 const DEFAULT_CATEGORIES = [
   { id: "c-bibit", name: "Bibit", type: "expense" },
   { id: "c-pestisida", name: "Pestisida", type: "expense" },
   { id: "c-tenagakerja", name: "Tenaga Kerja", type: "expense" },
-  { id: "c-sewaalat", name: "Sewa Alat/Lahan", type: "expense" },
+  { id: "c-sewaalat", name: "Sewa Alat", type: "expense" },
   { id: "c-irigasi", name: "Irigasi/Air", type: "expense" },
   { id: "c-lainexp", name: "Lainnya", type: "expense" },
   { id: "c-panen", name: "Hasil Panen", type: "income" },
@@ -29,9 +31,87 @@ const DEFAULT_CATEGORIES = [
   { id: CAT_BELI_PUPUK, name: "Pembelian Pupuk (Stok)", type: "expense", locked: true },
   { id: CAT_PEMUPUKAN, name: "Pemupukan (Pupuk + Kerja)", type: "expense", locked: true },
   { id: CAT_SALDO, name: "Input Saldo", type: "income", locked: true },
+  { id: CAT_SEWA_LAHAN, name: "Sewa Lahan", type: "expense", locked: true },
+  { id: CAT_PENGEMBALIAN_SEWA, name: "Pengembalian Sewa", type: "income", ensureDefault: true },
 ];
 
 const CURRENT_YEAR = new Date().getFullYear();
+const LEASE_GRACE_DAYS = 30;
+const LEASE_REMINDER_DAYS = 14;
+
+function getLeaseStatus(l) {
+  if (!l || !l.sewaSampai) return null;
+  const end = new Date(l.sewaSampai + "T00:00:00");
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((end - today) / 86400000);
+  if (diffDays >= 0) {
+    if (diffDays <= LEASE_REMINDER_DAYS) {
+      return { tone: "warn", text: diffDays === 0 ? "Sewa habis hari ini" : `Sewa habis ${diffDays} hari lagi` };
+    }
+    return null;
+  }
+  const graceDeadline = new Date(end.getTime() + LEASE_GRACE_DAYS * 86400000);
+  const daysLeftGrace = Math.round((graceDeadline - today) / 86400000);
+  if (daysLeftGrace > 0) {
+    return { tone: "danger", text: `Sewa habis, ${daysLeftGrace} hari lagi diarsipkan` };
+  }
+  return { tone: "danger", text: "Akan diarsipkan" };
+}
+
+function shouldAutoArchiveLahan(l) {
+  if (!l || l.archived || !l.sewaSampai) return false;
+  const end = new Date(l.sewaSampai + "T00:00:00");
+  const graceDeadline = new Date(end.getTime() + LEASE_GRACE_DAYS * 86400000);
+  return new Date() > graceDeadline;
+}
+
+const DAY_MS = 86400000;
+const YEAR_MS = 365.25 * DAY_MS;
+
+// hitung jadwal alokasi biaya sewa: kapan & berapa tiap "ulang tahun sewa" dari titik basis nilai yang belum kepake
+function computeSewaSchedule(l) {
+  if (!l || !l.sewaMulai || !l.sewaSampai || !l.sewaBasisTanggal || !l.sewaBasisNilai) return { perYear: 0, items: [] };
+  const start = new Date(l.sewaMulai + "T00:00:00");
+  const end = new Date(l.sewaSampai + "T00:00:00");
+  const basisDate = new Date(l.sewaBasisTanggal + "T00:00:00");
+  const yearsRemaining = Math.max(1, Math.round((end - basisDate) / YEAR_MS));
+  const perYear = l.sewaBasisNilai / yearsRemaining;
+  const items = [];
+  for (let k = 0; k < 200; k++) {
+    const anniv = new Date(start);
+    anniv.setFullYear(start.getFullYear() + k);
+    if (anniv >= end) break;
+    if (anniv >= basisDate) items.push({ index: k, date: anniv });
+  }
+  return { perYear, items };
+}
+
+// total nilai sewa yang sudah "kepake" (dibiayakan) sejak titik basis, dari riwayat transaksi
+function sewaTerpakaiSejakBasis(l, transactions) {
+  if (!l || !l.sewaBasisTanggal) return 0;
+  const basisStr = l.sewaBasisTanggal;
+  const alokasi = transactions
+    .filter((t) => t.kind === "sewa_alokasi" && t.lahanId === l.id && t.date >= basisStr)
+    .reduce((s, t) => s + t.amount, 0);
+  const pengembalian = transactions
+    .filter((t) => t.categoryId === CAT_PENGEMBALIAN_SEWA && t.lahanId === l.id && t.date >= basisStr)
+    .reduce((s, t) => s + t.amount, 0);
+  return alokasi + pengembalian;
+}
+
+function sisaAsetSewa(l, transactions) {
+  if (!l || !l.sewaBasisNilai) return 0;
+  return Math.max(0, l.sewaBasisNilai - sewaTerpakaiSejakBasis(l, transactions));
+}
+
+// tarif sewa lahan itu sendiri, Rp per 100 ru per tahun (pakai jadwal berjalan saat ini)
+function tarifSewa100Ru(l) {
+  if (!l || !l.luasRu || l.luasRu <= 0) return null;
+  const { perYear } = computeSewaSchedule(l);
+  if (!perYear) return null;
+  return (perYear / l.luasRu) * 100;
+}
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
 
 const GOLD = "#C99A2E";
@@ -316,13 +396,13 @@ const inputStyle = {
 
 // ---------- Petak (plot) selector tile ----------
 
-function PetakTile({ label, net, active, onClick, isGlobal }) {
+function PetakTile({ label, net, active, onClick, isGlobal, lease }) {
   const positive = net >= 0;
   return (
     <button
       onClick={onClick}
       style={{
-        position: "relative", minWidth: isGlobal ? 128 : 116, height: 78,
+        position: "relative", minWidth: isGlobal ? 128 : 116, height: lease ? 94 : 78,
         borderRadius: 14, border: active ? `2px solid ${GOLD}` : "1px solid rgba(31,46,29,0.15)",
         background: active
           ? `linear-gradient(160deg, ${FOREST} 0%, #2C4028 100%)`
@@ -352,6 +432,14 @@ function PetakTile({ label, net, active, onClick, isGlobal }) {
           {positive ? "+" : ""}<Amt>{rupiah(net)}</Amt>
         </span>
       )}
+      {lease && (
+        <span style={{
+          fontSize: 9.5, fontWeight: 700, lineHeight: 1.3, marginTop: 2,
+          color: active ? "#FFE3A8" : (lease.tone === "danger" ? RUST : "#A0761E"),
+        }}>
+          {lease.text}
+        </span>
+      )}
     </button>
   );
 }
@@ -377,10 +465,12 @@ function LoginScreen({ onLogin }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [confirmingNew, setConfirmingNew] = useState(false);
+  const [connFailed, setConnFailed] = useState(false);
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
+    setConnFailed(false);
     const uname = username.trim().toLowerCase();
     if (!uname || !password) { setError("Isi username dan password dulu ya."); return; }
     setLoading(true);
@@ -399,6 +489,7 @@ function LoginScreen({ onLogin }) {
       }
     } catch (e) {
       setError("Gagal terhubung. Cek koneksi internet lalu coba lagi.");
+      setConnFailed(true);
     } finally {
       setLoading(false);
     }
@@ -464,6 +555,19 @@ function LoginScreen({ onLogin }) {
             <PrimaryBtn onClick={handleSubmit} style={{ width: "100%", justifyContent: "center" }}>
               {loading ? "Memeriksa..." : "Masuk"}
             </PrimaryBtn>
+            {connFailed && (
+              <button
+                type="button"
+                onClick={() => onLogin((username.trim() || "taniku").toLowerCase())}
+                style={{
+                  marginTop: 10, width: "100%", padding: "9px 0", borderRadius: 12,
+                  border: "1px dashed rgba(31,46,29,0.3)", background: "transparent",
+                  color: "#8A8A78", fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                }}
+              >
+                Lewati pengecekan (mode preview, tanpa Supabase)
+              </button>
+            )}
             <p style={{ fontSize: 12, color: "#8A8A78", marginTop: 14, textAlign: "center" }}>
               Username belum ada? Isi aja bebas — nanti ditawarin buat buku baru otomatis.
             </p>
@@ -516,6 +620,19 @@ function Dashboard({ username, onLogout }) {
   }, [username]);
 
   const [selectedLahan, setSelectedLahan] = useState("all"); // 'all' or lahan id
+  const [dashPage, setDashPage] = useState(0); // 0 = dashboard, 1 = riwayat transaksi
+  const touchStartXRef = React.useRef(null);
+
+  function handleSwipeStart(e) {
+    touchStartXRef.current = e.touches[0].clientX;
+  }
+  function handleSwipeEnd(e) {
+    if (touchStartXRef.current === null) return;
+    const dx = e.changedTouches[0].clientX - touchStartXRef.current;
+    if (dx < -40) setDashPage(1);
+    else if (dx > 40) setDashPage(0);
+    touchStartXRef.current = null;
+  }
   const [showTxModal, setShowTxModal] = useState(false);
   const [txPreset, setTxPreset] = useState(null); // preset type for quick-add shortcuts
   const [showLahanModal, setShowLahanModal] = useState(false);
@@ -525,11 +642,14 @@ function Dashboard({ username, onLogout }) {
   const [showPemupukanModal, setShowPemupukanModal] = useState(false);
   const [showSaldoModal, setShowSaldoModal] = useState(false);
   const [showRecordModal, setShowRecordModal] = useState(false);
+  const [recordFocusLahan, setRecordFocusLahan] = useState(null);
   const [showFabMenu, setShowFabMenu] = useState(false);
   const [editingTx, setEditingTx] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
-  const [confirmDeletePupuk, setConfirmDeletePupuk] = useState(null);
-  
+  const [confirmDeleteLahanId, setConfirmDeleteLahanId] = useState(null);
+  const [confirmSoftDeleteLahanId, setConfirmSoftDeleteLahanId] = useState(null);
+  const [confirmDeleteStokId, setConfirmDeleteStokId] = useState(null);
+
   const ready = lahanLoaded && catLoaded && txLoaded && stokLoaded;
 
   // seed default categories only after load confirms empty AND catLoaded true and no existing write happened
@@ -543,11 +663,48 @@ function Dashboard({ username, onLogout }) {
   // pastikan kategori terkunci (pembelian pupuk & pemupukan) selalu ada, walau data lama belum punya
   useEffect(() => {
     if (catLoaded && categories.length > 0) {
-      const missing = DEFAULT_CATEGORIES.filter((d) => d.locked && !categories.find((c) => c.id === d.id));
+      const missing = DEFAULT_CATEGORIES.filter((d) => (d.locked || d.ensureDefault) && !categories.find((c) => c.id === d.id));
       if (missing.length > 0) setCategories([...categories, ...missing]);
     }
     // eslint-disable-next-line
   }, [catLoaded, categories.length]);
+
+  // auto-arsip lahan yang tanggal sewanya sudah lewat masa tenggang
+  useEffect(() => {
+    if (!lahanLoaded) return;
+    const toArchive = lahanList.filter((l) => shouldAutoArchiveLahan(l));
+    if (toArchive.length > 0) {
+      const ids = new Set(toArchive.map((l) => l.id));
+      setLahanList(lahanList.map((l) => (ids.has(l.id) ? { ...l, archived: true } : l)));
+    }
+    // eslint-disable-next-line
+  }, [lahanLoaded, lahanList]);
+
+  // auto-alokasi biaya sewa lahan yang sudah jatuh tempo (ulang tahun sewa yang sudah lewat)
+  useEffect(() => {
+    if (!lahanLoaded || !txLoaded) return;
+    const today = new Date();
+    const newAllocs = [];
+    lahanList.forEach((l) => {
+      const { perYear, items } = computeSewaSchedule(l);
+      if (!perYear || items.length === 0) return;
+      const existingIdx = new Set(
+        transactions.filter((t) => t.kind === "sewa_alokasi" && t.lahanId === l.id).map((t) => t.alokasiKe)
+      );
+      items.forEach((it) => {
+        if (it.date <= today && !existingIdx.has(it.index)) {
+          newAllocs.push({
+            id: uid("tx"), kind: "sewa_alokasi", type: "expense", lahanId: l.id,
+            categoryId: CAT_SEWA_LAHAN, amount: perYear, cashAmount: 0,
+            alokasiKe: it.index, date: it.date.toISOString().slice(0, 10),
+            note: `Alokasi biaya sewa tahun ke-${it.index + 1}`,
+          });
+        }
+      });
+    });
+    if (newAllocs.length > 0) setTransactions([...transactions, ...newAllocs]);
+    // eslint-disable-next-line
+  }, [lahanLoaded, txLoaded, lahanList, transactions]);
 
   const lahanMap = useMemo(() => {
     const m = {};
@@ -584,6 +741,42 @@ function Dashboard({ username, onLogout }) {
     }, 0);
   }, [transactions]);
 
+  const nilaiStokPupuk = useMemo(() => {
+    return stokPupuk.reduce((s, i) => s + i.stokKg * i.hargaPerKg, 0);
+  }, [stokPupuk]);
+
+  const sewaAktifList = useMemo(() => {
+    return lahanList.filter((l) => !l.archived && l.sewaMulai && l.sewaBasisNilai);
+  }, [lahanList]);
+
+  const sisaAsetSewaTampil = useMemo(() => {
+    if (selectedLahan === "all") {
+      return sewaAktifList.reduce((s, l) => s + sisaAsetSewa(l, transactions), 0);
+    }
+    const l = lahanMap[selectedLahan];
+    if (!l || !l.sewaMulai || !l.sewaBasisNilai) return 0;
+    return sisaAsetSewa(l, transactions);
+  }, [selectedLahan, sewaAktifList, transactions, lahanMap]);
+
+  const tarifSewaSelected = useMemo(() => {
+    if (selectedLahan === "all") return null;
+    const l = lahanMap[selectedLahan];
+    if (!l || !l.sewaMulai) return null;
+    return tarifSewa100Ru(l);
+  }, [selectedLahan, lahanMap]);
+
+  const rataRataSewa100Ru = useMemo(() => {
+    let totalPerYear = 0, totalLuas = 0;
+    sewaAktifList.forEach((l) => {
+      if (!l.luasRu || l.luasRu <= 0) return;
+      const { perYear } = computeSewaSchedule(l);
+      totalPerYear += perYear;
+      totalLuas += l.luasRu;
+    });
+    if (totalLuas <= 0) return null;
+    return (totalPerYear / totalLuas) * 100;
+  }, [sewaAktifList]);
+
   const totals = useMemo(() => {
     let income = 0, expenseCash = 0, expenseFull = 0;
     filteredTx.forEach((t) => {
@@ -612,7 +805,7 @@ function Dashboard({ username, onLogout }) {
 
   const lahanCompareData = useMemo(() => {
     const yearTx = transactions.filter((t) => txYear(t) === CURRENT_YEAR);
-    return lahanList.map((l) => ({
+    return lahanList.filter((l) => !l.archived).map((l) => ({
       name: l.name,
       Pemasukan: yearTx.filter((t) => t.lahanId === l.id && t.type === "income").reduce((s, t) => s + t.amount, 0),
       Pengeluaran: yearTx.filter((t) => t.lahanId === l.id && t.type === "expense").reduce((s, t) => s + t.amount, 0),
@@ -759,18 +952,66 @@ function Dashboard({ username, onLogout }) {
     }
   }
 
-  async function saveLahan(lahan) {
-    if (lahan.id) {
-      await setLahanList(lahanList.map((l) => (l.id === lahan.id ? lahan : l)));
+  async function saveLahan({ id, name, luasRu, sewaMulai, sewaSampai, totalBiayaSewa, sewaBaru }) {
+    const isSewa = !!(totalBiayaSewa && totalBiayaSewa > 0 && sewaMulai && sewaSampai);
+    const patch = {
+      name, luasRu: luasRu || null, sewaSampai: sewaSampai || null,
+      sewaMulai: isSewa ? sewaMulai : null,
+      sewaBasisTanggal: isSewa ? (sewaBaru ? sewaMulai : todayStr()) : null,
+      sewaBasisNilai: isSewa ? totalBiayaSewa : null,
+    };
+    let targetId = id;
+    if (id) {
+      await setLahanList(lahanList.map((l) => (l.id === id ? { ...l, ...patch } : l)));
     } else {
-      await setLahanList([...lahanList, { ...lahan, id: uid("lahan") }]);
+      targetId = uid("lahan");
+      await setLahanList([...lahanList, { ...patch, id: targetId }]);
+    }
+    if (isSewa && sewaBaru) {
+      await setTransactions([...transactions, {
+        id: uid("tx"), kind: "sewa_bayar", type: "expense", lahanId: null,
+        categoryId: CAT_SEWA_LAHAN, amount: totalBiayaSewa, cashAmount: totalBiayaSewa,
+        sewaLahanId: targetId, date: todayStr(), note: `Bayar sewa ${name}`,
+      }]);
     }
   }
 
-  async function deleteLahan(id) {
+  async function archiveLahan(id, archived) {
+    await setLahanList(lahanList.map((l) => (l.id === id ? { ...l, archived } : l)));
+    if (archived && selectedLahan === id) setSelectedLahan("all");
+  }
+
+  async function hardDeleteLahan(id) {
     await setLahanList(lahanList.filter((l) => l.id !== id));
     await setTransactions(transactions.filter((t) => t.lahanId !== id));
     if (selectedLahan === id) setSelectedLahan("all");
+    setConfirmDeleteLahanId(null);
+  }
+
+  function requestDeleteLahan(id) {
+    setConfirmDeleteLahanId(id);
+  }
+
+  function requestSoftDeleteLahan(id) {
+    setConfirmSoftDeleteLahanId(id);
+  }
+
+  async function confirmSoftDeleteLahan() {
+    if (confirmSoftDeleteLahanId) {
+      await archiveLahan(confirmSoftDeleteLahanId, true);
+      setConfirmSoftDeleteLahanId(null);
+    }
+  }
+
+  function requestDeleteStok(id) {
+    setConfirmDeleteStokId(id);
+  }
+
+  async function confirmDeleteStok() {
+    if (confirmDeleteStokId) {
+      await setStokPupuk(stokPupuk.filter((s) => s.id !== confirmDeleteStokId));
+      setConfirmDeleteStokId(null);
+    }
   }
 
   async function saveCategory(cat) {
@@ -847,15 +1088,55 @@ function Dashboard({ username, onLogout }) {
             </div>
           </div>
 
-          <div style={{
-            display: "inline-flex", alignItems: "center", gap: 7, background: "rgba(201,154,46,0.15)",
-            padding: "6px 12px", borderRadius: 20, marginBottom: 14,
-          }}>
-            <PiggyBank size={14} color={GOLD} />
-            <span style={{ fontSize: 12, opacity: 0.85 }}>Saldo Kas</span>
-            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13.5, fontWeight: 700, color: GOLD }}>
-              <Amt>{rupiah(saldoKas)}</Amt>
-            </span>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+            <div style={{
+              display: "inline-flex", alignItems: "center", gap: 7, background: "rgba(201,154,46,0.15)",
+              padding: "6px 12px", borderRadius: 20,
+            }}>
+              <PiggyBank size={14} color={GOLD} />
+              <span style={{ fontSize: 12, opacity: 0.85 }}>Saldo Kas</span>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13.5, fontWeight: 700, color: GOLD }}>
+                <Amt>{rupiah(saldoKas)}</Amt>
+              </span>
+            </div>
+
+            {sisaAsetSewaTampil > 0 && (
+              <div style={{
+                display: "inline-flex", alignItems: "center", gap: 7, background: "rgba(76,107,61,0.18)",
+                padding: "6px 12px", borderRadius: 20,
+              }}>
+                <Landmark size={14} color="#8FCB6A" />
+                <span style={{ fontSize: 12, opacity: 0.85 }}>Sisa Aset Sewa</span>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13.5, fontWeight: 700, color: "#8FCB6A" }}>
+                  <Amt>{rupiah(sisaAsetSewaTampil)}</Amt>
+                </span>
+              </div>
+            )}
+
+            {nilaiStokPupuk > 0 && (
+              <div style={{
+                display: "inline-flex", alignItems: "center", gap: 7, background: "rgba(255,255,255,0.1)",
+                padding: "6px 12px", borderRadius: 20,
+              }}>
+                <Package size={14} color="#D9D4C2" />
+                <span style={{ fontSize: 12, opacity: 0.85 }}>Nilai Stok Pupuk</span>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13.5, fontWeight: 700, color: "#D9D4C2" }}>
+                  <Amt>{rupiah(nilaiStokPupuk)}</Amt>
+                </span>
+              </div>
+            )}
+
+            {rataRataSewa100Ru !== null && (
+              <div style={{
+                display: "inline-flex", alignItems: "center", gap: 7, background: "rgba(255,255,255,0.1)",
+                padding: "6px 12px", borderRadius: 20,
+              }}>
+                <span style={{ fontSize: 12, opacity: 0.85 }}>Rata-rata Sewa</span>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, fontWeight: 700, color: "#D9D4C2" }}>
+                  <Amt>{rupiah(rataRataSewa100Ru)}</Amt>/100ru/thn
+                </span>
+              </div>
+            )}
           </div>
 
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
@@ -884,35 +1165,36 @@ function Dashboard({ username, onLogout }) {
               active={selectedLahan === "all"}
               onClick={() => setSelectedLahan("all")}
             />
-            {lahanList.map((l) => (
+            {lahanList.filter((l) => !l.archived).map((l) => (
               <PetakTile
                 key={l.id}
                 label={l.name}
                 net={netForLahan(l.id)}
                 active={selectedLahan === l.id}
                 onClick={() => setSelectedLahan(l.id)}
+                lease={getLeaseStatus(l)}
               />
             ))}
-            <button
-              onClick={() => setShowLahanModal(true)}
-              style={{
-                minWidth: 60, height: 78, borderRadius: 14, border: "1.5px dashed rgba(246,243,231,0.35)",
-                background: "transparent", color: "rgba(246,243,231,0.7)", cursor: "pointer",
-                display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-              }}
-              title="Kelola lahan"
-            >
-              <Plus size={20} />
-            </button>
           </div>
+          <button
+            onClick={() => setShowLahanModal(true)}
+            style={{
+              width: "100%", marginTop: 10, padding: "10px 0", borderRadius: 12,
+              border: "1.5px dashed rgba(246,243,231,0.35)", background: "transparent",
+              color: "rgba(246,243,231,0.85)", cursor: "pointer", fontSize: 13, fontWeight: 700,
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            }}
+          >
+            <Plus size={16} /> Lahan
+          </button>
         </div>
       </header>
 
-      <main style={{ maxWidth: 960, margin: "0 auto", padding: "22px 20px 100px" }}>
+      <main style={{ maxWidth: 960, margin: "0 auto", padding: "22px 0 100px" }}>
         {lahanList.length === 0 && (
           <div style={{
             background: CARD, borderRadius: 16, padding: 28, textAlign: "center",
-            border: "1px dashed rgba(31,46,29,0.2)", marginBottom: 20,
+            border: "1px dashed rgba(31,46,29,0.2)", marginBottom: 20, marginLeft: 20, marginRight: 20,
           }}>
             <Sprout size={26} color={GREEN} style={{ marginBottom: 8 }} />
             <p style={{ margin: "0 0 14px", color: "#5A5A4A" }}>Belum ada lahan. Tambahkan lahan pertama untuk mulai mencatat.</p>
@@ -922,113 +1204,178 @@ function Dashboard({ username, onLogout }) {
           </div>
         )}
 
-        {/* Summary cards */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 8 }}>
-          <SummaryCard icon={<TrendingUp size={16} color={GREEN} />} label="Pemasukan" value={totals.income} color={GREEN}
-            onAdd={lahanList.length > 0 ? () => { setTxPreset("income"); setEditingTx(null); setShowTxModal(true); } : null} />
-          <SummaryCard icon={<TrendingDown size={16} color={RUST} />} label={isGlobalView ? "Pengeluaran (Kas)" : "Pengeluaran (Biaya)"} value={totals.expense} color={RUST}
-            onAdd={lahanList.length > 0 ? () => { setTxPreset("expense"); setEditingTx(null); setShowTxModal(true); } : null} />
-          <SummaryCard icon={<Wallet size={16} color={GOLD} />} label="Selisih" value={totals.net} color={totals.net >= 0 ? GREEN : RUST} />
-        </div>
-        {isGlobalView && stokPupuk.length > 0 && (
-          <p style={{ fontSize: 12, color: "#8A8A78", margin: "0 0 18px" }}>
-            *Kas keluar tidak menghitung dobel nilai pupuk yang dipakai di lahan — pupuk itu sudah dibayar saat dibeli.
-          </p>
-        )}
-        {!isGlobalView && (
-          <p style={{ fontSize: 12, color: "#8A8A78", margin: "0 0 18px" }}>
-            *Biaya sudah termasuk nilai pupuk yang dipakai dari stok, meski uangnya keluar duluan saat pembelian.
-          </p>
-        )}
-
-        {/* Charts */}
-        {chartData.length > 0 && (
-          <div style={{ background: CARD, borderRadius: 16, padding: "18px 16px", marginBottom: 20, border: "1px solid rgba(31,46,29,0.08)" }}>
-            <h3 style={{ margin: "0 0 14px", fontFamily: "'Fraunces', serif", fontSize: 16, color: FOREST }}>
-              Pengeluaran per Kategori
-            </h3>
-            <ResponsiveContainer key={`pie-${selectedLahan}`} width="100%" height={220}>
-              <PieChart>
-                <Pie data={chartData} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={chartData.length > 1 ? 2 : 0} isAnimationActive={false}>
-                  {chartData.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} stroke="none" />)}
-                </Pie>
-                <Tooltip formatter={(v) => rupiah(v)} contentStyle={{ fontFamily: "'Public Sans', sans-serif", borderRadius: 8, border: "1px solid rgba(31,46,29,0.15)" }} />
-                <Legend iconType="circle" layout="horizontal" verticalAlign="bottom" align="center" wrapperStyle={{ fontSize: 12 }} />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-        )}
-
-        {selectedLahan === "all" && lahanCompareData.length > 1 && (
-          <div style={{ background: CARD, borderRadius: 16, padding: "18px 16px", marginBottom: 20, border: "1px solid rgba(31,46,29,0.08)" }}>
-            <h3 style={{ margin: "0 0 14px", fontFamily: "'Fraunces', serif", fontSize: 16, color: FOREST }}>
-              Perbandingan Antar Lahan
-            </h3>
-            <ResponsiveContainer key="bar-compare" width="100%" height={220}>
-              <BarChart data={lahanCompareData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(31,46,29,0.1)" />
-                <XAxis dataKey="name" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => (v >= 1000000 ? `${v / 1000000}jt` : v)} />
-                <Tooltip formatter={(v) => rupiah(v)} contentStyle={{ fontFamily: "'Public Sans', sans-serif", borderRadius: 8, border: "1px solid rgba(31,46,29,0.15)" }} />
-                <Legend iconType="circle" layout="horizontal" verticalAlign="bottom" align="center" wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="Pemasukan" fill={GREEN} radius={[4, 4, 0, 0]} isAnimationActive={false} />
-                <Bar dataKey="Pengeluaran" fill={RUST} radius={[4, 4, 0, 0]} isAnimationActive={false} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        )}
-
-        {/* Transaction list */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-          <h3 style={{ margin: 0, fontFamily: "'Fraunces', serif", fontSize: 17, color: FOREST }}>
-            Riwayat Transaksi
-          </h3>
-          <span style={{ fontSize: 12.5, color: "#7A7A68" }}>{filteredTx.length} catatan</span>
-        </div>
-
-        {filteredTx.length === 0 ? (
-          <div style={{ padding: 24, textAlign: "center", color: "#8A8A78", fontSize: 14 }}>
-            Belum ada transaksi{selectedLahan !== "all" ? " di lahan ini" : ""}.
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {filteredTx.map((t) => (
-              <div key={t.id} style={{
-                background: "#fff", borderRadius: 12, padding: "12px 14px",
-                display: "flex", alignItems: "center", justifyContent: "space-between",
-                border: "1px solid rgba(31,46,29,0.08)",
-              }}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14.5, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    {catMap[t.categoryId]?.name || "Lainnya"}
-                    {selectedLahan === "all" && (
-                      <span style={{
-                        fontSize: 10.5, background: "#EFEAD9", color: "#5A5A4A",
-                        padding: "2px 7px", borderRadius: 20, fontWeight: 600,
-                      }}>
-                        {lahanMap[t.lahanId]?.name || "?"}
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ fontSize: 12.5, color: "#8A8A78", marginTop: 2 }}>
-                    {t.date}
-                    {t.kind === "pupuk_usage" && ` · ${t.kg}kg ${t.pupukNama} → Pupuk ${rupiah(t.pupukCost)} + Kerja ${rupiah(t.laborCost)}`}
-                    {t.kind === "pupuk_purchase" && ` · +${t.kg}kg ${t.pupukNama} ke stok`}
-                    {!t.kind && t.note ? ` · ${t.note}` : ""}
-                  </div>
+        {lahanList.length > 0 && (
+          <div onTouchStart={handleSwipeStart} onTouchEnd={handleSwipeEnd} style={{ overflow: "hidden" }}>
+            <div style={{
+              display: "flex", width: "200%",
+              transform: `translateX(${dashPage === 0 ? "0%" : "-50%"})`,
+              transition: "transform .25s ease",
+            }}>
+              {/* Halaman 1: Dashboard */}
+              <div style={{ width: "50%", flexShrink: 0, boxSizing: "border-box", padding: "0 20px" }}>
+                {/* Summary cards */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 8 }}>
+                  <SummaryCard icon={<TrendingUp size={16} color={GREEN} />} label="Pemasukan" value={totals.income} color={GREEN}
+                    onAdd={() => { setTxPreset("income"); setEditingTx(null); setShowTxModal(true); }} />
+                  <SummaryCard icon={<TrendingDown size={16} color={RUST} />} label={isGlobalView ? "Pengeluaran (Kas)" : "Pengeluaran (Biaya)"} value={totals.expense} color={RUST}
+                    onAdd={() => { setTxPreset("expense"); setEditingTx(null); setShowTxModal(true); }} />
+                  <SummaryCard icon={<Wallet size={16} color={GOLD} />} label="Selisih" value={totals.net} color={totals.net >= 0 ? GREEN : RUST} />
+                  {tarifSewaSelected !== null && (
+                    <SummaryCard icon={<Landmark size={16} color={FOREST} />} label="Tarif Sewa /100ru/thn" value={tarifSewaSelected} color={FOREST} />
+                  )}
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                  <span style={{
-                    fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14.5,
-                    color: t.type === "income" ? GREEN : RUST, whiteSpace: "nowrap",
-                  }}>
-                    {t.type === "income" ? "+" : "-"}<Amt>{rupiah(t.amount)}</Amt>
-                  </span>
-                  <IconBtn onClick={() => openEditFor(t)} title="Edit"><Pencil size={14} /></IconBtn>
-                  <IconBtn onClick={() => requestDeleteTx(t.id)} title="Hapus" danger><Trash2 size={14} /></IconBtn>
-                </div>
+                {isGlobalView && stokPupuk.length > 0 && (
+                  <p style={{ fontSize: 12, color: "#8A8A78", margin: "0 0 18px" }}>
+                    *Kas keluar tidak menghitung dobel nilai pupuk yang dipakai di lahan — pupuk itu sudah dibayar saat dibeli.
+                  </p>
+                )}
+
+                {/* Charts */}
+                {chartData.length > 0 && (
+                  <div style={{ background: CARD, borderRadius: 16, padding: "18px 16px", marginBottom: 20, border: "1px solid rgba(31,46,29,0.08)" }}>
+                    <h3 style={{ margin: "0 0 14px", fontFamily: "'Fraunces', serif", fontSize: 16, color: FOREST }}>
+                      Pengeluaran per Kategori
+                    </h3>
+                    <ResponsiveContainer key={`pie-${selectedLahan}`} width="100%" height={220}>
+                      <PieChart>
+                        <Pie data={chartData} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={chartData.length > 1 ? 2 : 0} isAnimationActive={false}>
+                          {chartData.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} stroke="none" />)}
+                        </Pie>
+                        <Tooltip formatter={(v) => rupiah(v)} contentStyle={{ fontFamily: "'Public Sans', sans-serif", borderRadius: 8, border: "1px solid rgba(31,46,29,0.15)" }} />
+                        <Legend iconType="circle" layout="horizontal" verticalAlign="bottom" align="center" wrapperStyle={{ fontSize: 12 }} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <button
+                      onClick={() => setDashPage(1)}
+                      style={{
+                        marginTop: 4, width: "100%", padding: "9px 0", borderRadius: 10,
+                        border: "1px solid rgba(31,46,29,0.15)", background: "#fff", color: FOREST,
+                        fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex",
+                        alignItems: "center", justifyContent: "center", gap: 6,
+                      }}
+                    >
+                      Rincian Transaksi <ChevronRight size={15} />
+                    </button>
+                  </div>
+                )}
+
+                {selectedLahan === "all" && lahanCompareData.length > 1 && (
+                  <div style={{ background: CARD, borderRadius: 16, padding: "18px 16px", marginBottom: 20, border: "1px solid rgba(31,46,29,0.08)" }}>
+                    <h3 style={{ margin: "0 0 14px", fontFamily: "'Fraunces', serif", fontSize: 16, color: FOREST }}>
+                      Perbandingan Antar Lahan
+                    </h3>
+                    <ResponsiveContainer key="bar-compare" width="100%" height={220}>
+                      <BarChart data={lahanCompareData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(31,46,29,0.1)" />
+                        <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                        <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => (v >= 1000000 ? `${v / 1000000}jt` : v)} />
+                        <Tooltip formatter={(v) => rupiah(v)} contentStyle={{ fontFamily: "'Public Sans', sans-serif", borderRadius: 8, border: "1px solid rgba(31,46,29,0.15)" }} />
+                        <Legend iconType="circle" layout="horizontal" verticalAlign="bottom" align="center" wrapperStyle={{ fontSize: 12 }} />
+                        <Bar dataKey="Pemasukan" fill={GREEN} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                        <Bar dataKey="Pengeluaran" fill={RUST} radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
               </div>
-            ))}
+
+              {/* Halaman 2: Riwayat Transaksi */}
+              <div style={{ width: "50%", flexShrink: 0, boxSizing: "border-box", padding: "0 20px" }}>
+                <button
+                  onClick={() => setDashPage(0)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 4, background: "none", border: "none",
+                    color: GREEN, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: 0, marginBottom: 14,
+                  }}
+                >
+                  <ChevronLeft size={16} /> Kembali ke Dashboard
+                </button>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                  <h3 style={{ margin: 0, fontFamily: "'Fraunces', serif", fontSize: 17, color: FOREST }}>
+                    Riwayat Transaksi
+                  </h3>
+                  <span style={{ fontSize: 12.5, color: "#7A7A68" }}>{filteredTx.length} catatan</span>
+                </div>
+
+                {filteredTx.length === 0 ? (
+                  <div style={{ padding: 24, textAlign: "center", color: "#8A8A78", fontSize: 14 }}>
+                    Belum ada transaksi{selectedLahan !== "all" ? " di lahan ini" : ""}.
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {filteredTx.map((t) => (
+                      <div key={t.id} style={{
+                        background: t.kind === "sewa_alokasi" ? "#F2EFE4" : "#fff", borderRadius: 12, padding: "12px 14px",
+                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                        border: "1px solid rgba(31,46,29,0.08)",
+                      }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{
+                            fontWeight: 600, fontSize: 14.5, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+                            fontStyle: t.kind === "sewa_alokasi" ? "italic" : "normal",
+                            color: t.kind === "sewa_alokasi" ? "#8A8A78" : INK,
+                          }}>
+                            {catMap[t.categoryId]?.name || "Lainnya"}
+                            {t.kind === "sewa_alokasi" && (
+                              <span style={{
+                                fontSize: 10, background: "#E3DFD0", color: "#5A5A4A",
+                                padding: "2px 7px", borderRadius: 20, fontWeight: 600, fontStyle: "normal",
+                              }}>
+                                Alokasi otomatis
+                              </span>
+                            )}
+                            {selectedLahan === "all" && (
+                              <span style={{
+                                fontSize: 10.5, background: "#EFEAD9", color: "#5A5A4A",
+                                padding: "2px 7px", borderRadius: 20, fontWeight: 600,
+                              }}>
+                                {lahanMap[t.lahanId]?.name || "?"}
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: 12.5, color: "#8A8A78", marginTop: 2 }}>
+                            {t.date}
+                            {t.kind === "pupuk_usage" && ` · ${t.kg}kg ${t.pupukNama} → Pupuk ${rupiah(t.pupukCost)} + Kerja ${rupiah(t.laborCost)}`}
+                            {t.kind === "pupuk_purchase" && ` · +${t.kg}kg ${t.pupukNama} ke stok`}
+                            {t.kind === "sewa_bayar" && ` · pembayaran sewa`}
+                            {!t.kind && t.note ? ` · ${t.note}` : ""}
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                          <span style={{
+                            fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14.5,
+                            color: t.type === "income" ? GREEN : RUST, whiteSpace: "nowrap",
+                          }}>
+                            {t.type === "income" ? "+" : "-"}<Amt>{rupiah(t.amount)}</Amt>
+                          </span>
+                          {t.kind !== "sewa_alokasi" && t.kind !== "sewa_bayar" && (
+                            <IconBtn onClick={() => openEditFor(t)} title="Edit"><Pencil size={14} /></IconBtn>
+                          )}
+                          {t.kind !== "sewa_alokasi" && (
+                            <IconBtn onClick={() => requestDeleteTx(t.id)} title="Hapus" danger><Trash2 size={14} /></IconBtn>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* indikator halaman */}
+            <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 16 }}>
+              {[0, 1].map((i) => (
+                <button
+                  key={i}
+                  onClick={() => setDashPage(i)}
+                  style={{
+                    width: dashPage === i ? 18 : 7, height: 7, borderRadius: 4, border: "none",
+                    background: dashPage === i ? FOREST : "rgba(31,46,29,0.25)", cursor: "pointer",
+                    transition: "width .2s ease", padding: 0,
+                  }}
+                />
+              ))}
+            </div>
           </div>
         )}
       </main>
@@ -1077,8 +1424,40 @@ function Dashboard({ username, onLogout }) {
         <LahanModal
           onClose={() => setShowLahanModal(false)}
           lahanList={lahanList}
+          transactions={transactions}
           onSave={saveLahan}
-          onDelete={deleteLahan}
+          onArchive={requestSoftDeleteLahan}
+          onRestore={(id) => archiveLahan(id, false)}
+          onRequestDelete={requestDeleteLahan}
+          onViewHistory={(id) => {
+            setShowLahanModal(false);
+            setRecordFocusLahan(id);
+            setShowRecordModal(true);
+          }}
+        />
+      )}
+
+      {confirmSoftDeleteLahanId && (() => {
+        const l = lahanList.find((x) => x.id === confirmSoftDeleteLahanId);
+        const sisa = l ? sisaAsetSewa(l, transactions) : 0;
+        return (
+          <ConfirmModal
+            title="Hapus Lahan?"
+            message={sisa > 0
+              ? `Yakin hapus lahan ini? Masih ada Sisa Aset Sewa ${rupiah(sisa)} yang belum kepake. Riwayat transaksinya tetap tersimpan.`
+              : "Yakin hapus lahan ini? Riwayat transaksinya tetap tersimpan."}
+            onConfirm={confirmSoftDeleteLahan}
+            onCancel={() => setConfirmSoftDeleteLahanId(null)}
+          />
+        );
+      })()}
+
+      {confirmDeleteLahanId && (
+        <ConfirmModal
+          title="Hapus Lahan Permanen?"
+          message={`Yakin? ${transactions.filter((t) => t.lahanId === confirmDeleteLahanId).length} transaksi di lahan ini ikut terhapus dan tidak bisa dikembalikan.`}
+          onConfirm={() => hardDeleteLahan(confirmDeleteLahanId)}
+          onCancel={() => setConfirmDeleteLahanId(null)}
         />
       )}
 
@@ -1092,27 +1471,15 @@ function Dashboard({ username, onLogout }) {
       )}
 
       {showStokModal && (
-        <StokModal 
-          onClose={() => setShowStokModal(false)} 
-          stokPupuk={stokPupuk} 
-          onAddJenis={addPupukJenis}
-          onDeletePupuk={(id) => {
-            // Set state untuk confirm modal
-            setConfirmDeletePupuk(id);
-          }}
-        />
+        <StokModal onClose={() => setShowStokModal(false)} stokPupuk={stokPupuk} onAddJenis={addPupukJenis} onRequestDelete={requestDeleteStok} />
       )}
 
-      {/* Confirm Modal untuk hapus pupuk */}
-      {confirmDeletePupuk && (
+      {confirmDeleteStokId && (
         <ConfirmModal
-          title="Hapus Jenis Pupuk?"
-          message={`Yakin mau hapus pupuk ini? Transaksi yang sudah pakai pupuk ini tetap tersimpan.`}
-          onConfirm={async () => {
-            await setStokPupuk(stokPupuk.filter(s => s.id !== confirmDeletePupuk));
-            setConfirmDeletePupuk(null);
-          }}
-          onCancel={() => setConfirmDeletePupuk(null)}
+          title="Hapus Pupuk?"
+          message="Yakin hapus jenis pupuk ini?"
+          onConfirm={confirmDeleteStok}
+          onCancel={() => setConfirmDeleteStokId(null)}
         />
       )}
 
@@ -1155,10 +1522,11 @@ function Dashboard({ username, onLogout }) {
 
       {showRecordModal && (
         <RecordModal
-          onClose={() => setShowRecordModal(false)}
+          onClose={() => { setShowRecordModal(false); setRecordFocusLahan(null); }}
           transactions={transactions}
           lahanList={lahanList}
           catMap={catMap}
+          focusLahanId={recordFocusLahan}
         />
       )}
     </div>
@@ -1255,7 +1623,7 @@ function TxModal({ onClose, onSave, lahanList, categories, initial, defaultLahan
       <div style={{ marginBottom: 14 }}>
         <FieldLabel>Lahan</FieldLabel>
         <select style={inputStyle} value={lahanId} onChange={(e) => setLahanId(e.target.value)}>
-          {lahanList.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          {lahanList.filter((l) => !l.archived || l.id === initial?.lahanId).map((l) => <option key={l.id} value={l.id}>{l.name}{l.archived ? " (sudah dihapus)" : ""}</option>)}
         </select>
       </div>
 
@@ -1288,45 +1656,131 @@ function TxModal({ onClose, onSave, lahanList, categories, initial, defaultLahan
   );
 }
 
-function LahanModal({ onClose, lahanList, onSave, onDelete }) {
-  const [editing, setEditing] = useState(null); // {id?, name, luas}
+function LahanModal({ onClose, lahanList, transactions, onSave, onArchive, onRestore, onRequestDelete, onViewHistory }) {
+  const [editing, setEditing] = useState(null);
   const [name, setName] = useState("");
-  const [luas, setLuas] = useState("");
+  const [luasRu, setLuasRu] = useState("");
+  const [sewaMulai, setSewaMulai] = useState("");
+  const [sewaSampai, setSewaSampai] = useState("");
+  const [totalBiayaSewa, setTotalBiayaSewa] = useState("");
+  const [sewaBaru, setSewaBaru] = useState(false);
+
+  const active = lahanList.filter((l) => !l.archived);
+  const archived = lahanList.filter((l) => l.archived);
+  const txCount = (id) => transactions.filter((t) => t.lahanId === id).length;
+  const yearRange = (id) => {
+    const years = transactions.filter((t) => t.lahanId === id).map((t) => txYear(t)).filter(Boolean);
+    if (years.length === 0) return null;
+    const min = Math.min(...years), max = Math.max(...years);
+    return min === max ? String(min) : `${min}–${max}`;
+  };
+  const periodeSewa = (l) => {
+    if (!l.sewaMulai || !l.sewaSampai) return null;
+    const a = new Date(l.sewaMulai).getFullYear();
+    const b = new Date(l.sewaSampai).getFullYear();
+    return a === b ? String(a) : `${a}-${b}`;
+  };
 
   function startEdit(l) {
     setEditing(l || {});
     setName(l?.name || "");
-    setLuas(l?.luas || "");
+    setLuasRu(l?.luasRu ? String(l.luasRu) : "");
+    setSewaMulai(l?.sewaMulai || "");
+    setSewaSampai(l?.sewaSampai || "");
+    setTotalBiayaSewa(l?.sewaBasisNilai ? String(l.sewaBasisNilai) : "");
+    setSewaBaru(false);
   }
 
   async function submit() {
     if (!name.trim()) return;
-    await onSave({ id: editing?.id, name: name.trim(), luas: luas.trim() });
+    await onSave({
+      id: editing?.id, name: name.trim(),
+      luasRu: luasRu ? parseFloat(luasRu) : null,
+      sewaMulai: sewaMulai || null,
+      sewaSampai: sewaSampai || null,
+      totalBiayaSewa: totalBiayaSewa ? parseFloat(totalBiayaSewa) : 0,
+      sewaBaru,
+    });
     setEditing(null);
-    setName("");
-    setLuas("");
+    setName(""); setLuasRu(""); setSewaMulai(""); setSewaSampai(""); setTotalBiayaSewa(""); setSewaBaru(false);
   }
 
   return (
     <Modal title="Kelola Lahan" onClose={onClose}>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
-        {lahanList.length === 0 && <p style={{ color: "#8A8A78", fontSize: 13.5, margin: 0 }}>Belum ada lahan.</p>}
-        {lahanList.map((l) => (
+        {active.length === 0 && <p style={{ color: "#8A8A78", fontSize: 13.5, margin: 0 }}>Belum ada lahan.</p>}
+        {active.map((l) => {
+          const lease = getLeaseStatus(l);
+          const periode = periodeSewa(l);
+          return (
           <div key={l.id} style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
             background: "#fff", borderRadius: 10, padding: "10px 12px", border: "1px solid rgba(31,46,29,0.08)",
           }}>
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 14.5 }}>{l.name}</div>
-              {l.luas && <div style={{ fontSize: 12, color: "#8A8A78" }}>{l.luas}</div>}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 600, fontSize: 14.5 }}>{l.name}</span>
+                  {periode && (
+                    <span style={{ fontSize: 11.5, color: "#8A8A78", fontFamily: "'JetBrains Mono', monospace" }}>{periode}</span>
+                  )}
+                </div>
+                {l.luasRu ? <div style={{ fontSize: 12, color: "#8A8A78" }}>{l.luasRu} ru</div> : null}
+                {lease && (
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: lease.tone === "danger" ? RUST : "#A0761E", marginTop: 2 }}>
+                    {lease.text}
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                <IconBtn onClick={() => startEdit(l)} title="Edit"><Pencil size={14} /></IconBtn>
+                <IconBtn onClick={() => onArchive(l.id, true)} title="Hapus (riwayat transaksi tetap tersimpan, bisa dilihat di Record)" danger><Trash2 size={14} /></IconBtn>
+              </div>
             </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              <IconBtn onClick={() => startEdit(l)} title="Edit"><Pencil size={14} /></IconBtn>
-              <IconBtn onClick={() => onDelete(l.id)} title="Hapus (transaksi terkait ikut terhapus)" danger><Trash2 size={14} /></IconBtn>
-            </div>
+            <button
+              onClick={() => onRequestDelete(l.id)}
+              style={{
+                marginTop: 8, background: "none", border: "none", color: "#B0AC9A", fontSize: 11.5,
+                fontWeight: 600, cursor: "pointer", padding: 0,
+              }}
+            >
+              Hapus permanen (transaksi ikut hilang total)
+            </button>
           </div>
-        ))}
+          );
+        })}
       </div>
+
+      {archived.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <h4 style={{ margin: "0 0 8px", fontSize: 13, color: "#8A8A78", textTransform: "uppercase", letterSpacing: 0.4 }}>Riwayat Lahan</h4>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {archived.map((l) => (
+              <div key={l.id} style={{
+                display: "flex", alignItems: "center", gap: 8,
+                background: "#F2EFE4", borderRadius: 10, padding: "9px 12px", border: "1px solid rgba(31,46,29,0.08)",
+              }}>
+                <button
+                  onClick={() => onViewHistory(l.id)}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    background: "none", border: "none", cursor: "pointer", textAlign: "left",
+                    flex: 1, padding: 0, minWidth: 0,
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 13.5, color: "#5A5A4A" }}>{l.name}</div>
+                    <div style={{ fontSize: 11.5, color: "#8A8A78" }}>
+                      {txCount(l.id)} transaksi{yearRange(l.id) ? ` · ${yearRange(l.id)}` : ""} · lihat di Record
+                    </div>
+                  </div>
+                  <ChevronRight size={15} color="#8A8A78" style={{ flexShrink: 0, marginLeft: 6 }} />
+                </button>
+                <IconBtn onClick={() => onRestore(l.id)} title="Aktifkan lagi"><RotateCcw size={14} /></IconBtn>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {editing ? (
         <div style={{ borderTop: "1px solid rgba(31,46,29,0.1)", paddingTop: 16 }}>
@@ -1335,9 +1789,37 @@ function LahanModal({ onClose, lahanList, onSave, onDelete }) {
             <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="mis. Sawah Blok A" autoFocus />
           </div>
           <div style={{ marginBottom: 14 }}>
-            <FieldLabel>Luas (opsional)</FieldLabel>
-            <input style={inputStyle} value={luas} onChange={(e) => setLuas(e.target.value)} placeholder="mis. 0.5 ha" />
+            <FieldLabel>Luas (ru, opsional)</FieldLabel>
+            <input style={inputStyle} type="number" min="0" value={luasRu} onChange={(e) => setLuasRu(e.target.value)} placeholder="mis. 200" />
           </div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+            <div style={{ flex: 1 }}>
+              <FieldLabel>Awal Sewa</FieldLabel>
+              <input style={inputStyle} type="date" value={sewaMulai} onChange={(e) => setSewaMulai(e.target.value)} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <FieldLabel>Sewa Sampai</FieldLabel>
+              <input style={inputStyle} type="date" value={sewaSampai} onChange={(e) => setSewaSampai(e.target.value)} />
+            </div>
+          </div>
+          <div style={{ marginBottom: 10 }}>
+            <FieldLabel>Total Biaya Sewa (Rp)</FieldLabel>
+            <input style={inputStyle} type="number" min="0" value={totalBiayaSewa} onChange={(e) => setTotalBiayaSewa(e.target.value)} placeholder="0" />
+            <p style={{ fontSize: 11.5, color: "#8A8A78", marginTop: 4, marginBottom: 0 }}>
+              Kosongkan / isi 0 kalau lahan sendiri (bukan sewa). Kalau lahan ini sewa yang sudah berjalan, isi sisa nilai sewa yang belum kepake.
+            </p>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18, cursor: "pointer" }}>
+            <input type="checkbox" checked={sewaBaru} onChange={(e) => setSewaBaru(e.target.checked)} style={{ width: 16, height: 16 }} />
+            <span style={{ fontSize: 13.5, fontWeight: 600, color: "#3A3A2E" }}>Sewa baru</span>
+          </label>
+          {totalBiayaSewa && parseFloat(totalBiayaSewa) > 0 && (
+            <p style={{ fontSize: 11.5, color: "#8A8A78", marginTop: -12, marginBottom: 16 }}>
+              {sewaBaru
+                ? "Dicentang: Saldo Kas akan langsung kepotong sebesar Total Biaya Sewa di atas."
+                : "Tidak dicentang: Kas tidak kepotong, ini cuma menyeting sisa nilai sewa yang belum kepake."}
+            </p>
+          )}
           <div style={{ display: "flex", gap: 8 }}>
             <PrimaryBtn onClick={submit} style={{ flex: 1, justifyContent: "center" }}>Simpan</PrimaryBtn>
             <button onClick={() => setEditing(null)} style={{
@@ -1440,7 +1922,7 @@ function CategoryModal({ onClose, categories, onSave, onDelete }) {
   );
 }
 
-function StokModal({ onClose, stokPupuk, onAddJenis, onDeletePupuk }) {
+function StokModal({ onClose, stokPupuk, onAddJenis, onRequestDelete }) {
   const [newName, setNewName] = useState("");
   const totalNilai = stokPupuk.reduce((s, i) => s + i.stokKg * i.hargaPerKg, 0);
 
@@ -1476,22 +1958,16 @@ function StokModal({ onClose, stokPupuk, onAddJenis, onDeletePupuk }) {
               <div style={{ fontSize: 12, color: "#8A8A78" }}>
                 {s.hargaPerKg > 0 ? `Rata-rata ${rupiah(s.hargaPerKg)}/kg` : "Belum ada harga"}
               </div>
-           </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <div style={{ textAlign: "right" }}>
                 <div style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14.5, color: s.stokKg > 0 ? GREEN : "#B0AC9A" }}>
                   {s.stokKg} kg
                 </div>
                 <div style={{ fontSize: 11.5, color: "#8A8A78" }}>{rupiah(s.stokKg * s.hargaPerKg)}</div>
               </div>
-              {s.stokKg === 0 && onDeletePupuk && (
-                <IconBtn 
-                  onClick={() => onDeletePupuk(s.id)} 
-                  title="Hapus pupuk (stok 0)" 
-                  danger
-                >
-                  <Trash2 size={14} />
-                </IconBtn>
+              {s.stokKg === 0 && (
+                <IconBtn onClick={() => onRequestDelete(s.id)} title="Hapus jenis pupuk ini" danger><Trash2 size={14} /></IconBtn>
               )}
             </div>
           </div>
@@ -1543,36 +2019,36 @@ function BeliPupukModal({ onClose, stokPupuk, onSave, initial }) {
             <select style={inputStyle} value={pupukId} onChange={(e) => setPupukId(e.target.value)}>
               {stokPupuk.map((s) => <option key={s.id} value={s.id}>{s.nama}</option>)}
             </select>
-            <button 
-  onClick={() => setAddingNew(true)} 
-  style={{
-    marginTop: 8,
-    padding: "10px 14px",
-    borderRadius: 10,
-    border: "2px dashed #4C6B3D",
-    background: "#F5FAF0",
-    color: "#4C6B3D",
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: "pointer",
-    width: "100%",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    transition: "all 0.2s"
-  }}
-  onMouseEnter={(e) => {
-    e.currentTarget.style.background = "#E8F5DE";
-    e.currentTarget.style.transform = "scale(1.01)";
-  }}
-  onMouseLeave={(e) => {
-    e.currentTarget.style.background = "#F5FAF0";
-    e.currentTarget.style.transform = "scale(1)";
-  }}
->
-  <Plus size={16} /> Tambah jenis pupuk baru
-</button>
+            <button
+              onClick={() => setAddingNew(true)}
+              style={{
+                marginTop: 8,
+                padding: "10px 14px",
+                borderRadius: 10,
+                border: "2px dashed #4C6B3D",
+                background: "#F5FAF0",
+                color: "#4C6B3D",
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: "pointer",
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 8,
+                transition: "all 0.2s"
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "#E8F5DE";
+                e.currentTarget.style.transform = "scale(1.01)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "#F5FAF0";
+                e.currentTarget.style.transform = "scale(1)";
+              }}
+            >
+              <Plus size={16} /> Tambah jenis pupuk baru
+            </button>
           </>
         ) : (
           <>
@@ -1649,7 +2125,7 @@ function PemupukanModal({ onClose, stokPupuk, lahanList, onSave, defaultLahan, i
       <div style={{ marginBottom: 14 }}>
         <FieldLabel>Lahan</FieldLabel>
         <select style={inputStyle} value={lahanId} onChange={(e) => setLahanId(e.target.value)}>
-          {lahanList.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          {lahanList.filter((l) => !l.archived || l.id === initial?.lahanId).map((l) => <option key={l.id} value={l.id}>{l.name}{l.archived ? " (sudah dihapus)" : ""}</option>)}
         </select>
       </div>
 
@@ -1737,11 +2213,17 @@ function SaldoModal({ onClose, onSave, initial }) {
   );
 }
 
-function RecordModal({ onClose, transactions, lahanList, catMap }) {
-  const [tab, setTab] = useState("bulanan"); // 'bulanan' | 'tahunan'
-  const [year, setYear] = useState(CURRENT_YEAR);
+function RecordModal({ onClose, transactions, lahanList, catMap, focusLahanId }) {
+  const [tab, setTab] = useState(focusLahanId ? "tahunan" : "bulanan"); // 'bulanan' | 'tahunan'
+  const [year, setYear] = useState(() => {
+    if (focusLahanId) {
+      const years = transactions.filter((t) => t.lahanId === focusLahanId).map((t) => txYear(t)).filter(Boolean);
+      if (years.length > 0) return Math.max(...years);
+    }
+    return CURRENT_YEAR;
+  });
   const [month, setMonth] = useState(new Date().getMonth() + 1);
-  const [drillLahan, setDrillLahan] = useState(null);
+  const [drillLahan, setDrillLahan] = useState(focusLahanId || null);
 
   const availableYears = useMemo(() => {
     const set = new Set([CURRENT_YEAR]);
@@ -1775,12 +2257,14 @@ function RecordModal({ onClose, transactions, lahanList, catMap }) {
   }, [periodTx]);
 
   const perLahan = useMemo(() => {
-    return lahanList.map((l) => {
-      const tx = periodTx.filter((t) => t.lahanId === l.id);
-      const income = tx.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
-      const expense = tx.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
-      return { lahan: l, income, expense, net: income - expense, count: tx.length };
-    });
+    return lahanList
+      .map((l) => {
+        const tx = periodTx.filter((t) => t.lahanId === l.id);
+        const income = tx.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
+        const expense = tx.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
+        return { lahan: l, income, expense, net: income - expense, count: tx.length };
+      })
+      .filter((row) => row.count > 0);
   }, [periodTx, lahanList]);
 
   const drillTx = drillLahan ? periodTx.filter((t) => t.lahanId === drillLahan) : [];
@@ -1805,11 +2289,13 @@ function RecordModal({ onClose, transactions, lahanList, catMap }) {
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {drillTx.map((t) => (
                 <div key={t.id} style={{
-                  background: "#fff", borderRadius: 10, padding: "10px 12px", border: "1px solid rgba(31,46,29,0.08)",
+                  background: t.kind === "sewa_alokasi" ? "#F2EFE4" : "#fff", borderRadius: 10, padding: "10px 12px", border: "1px solid rgba(31,46,29,0.08)",
                   display: "flex", justifyContent: "space-between", alignItems: "center",
                 }}>
                   <div>
-                    <div style={{ fontWeight: 600, fontSize: 13.5 }}>{catMap[t.categoryId]?.name || "Lainnya"}</div>
+                    <div style={{ fontWeight: 600, fontSize: 13.5, fontStyle: t.kind === "sewa_alokasi" ? "italic" : "normal", color: t.kind === "sewa_alokasi" ? "#8A8A78" : INK }}>
+                      {catMap[t.categoryId]?.name || "Lainnya"}{t.kind === "sewa_alokasi" ? " · alokasi otomatis" : ""}
+                    </div>
                     <div style={{ fontSize: 11.5, color: "#8A8A78" }}>
                       {t.date}
                       {t.kind === "pupuk_usage" && ` · ${t.kg}kg ${t.pupukNama}`}
@@ -1879,7 +2365,7 @@ function RecordModal({ onClose, transactions, lahanList, catMap }) {
 
           <h4 style={{ margin: "0 0 10px", fontFamily: "'Fraunces', serif", fontSize: 15, color: FOREST }}>Per Lahan</h4>
           {perLahan.length === 0 ? (
-            <p style={{ color: "#8A8A78", fontSize: 13.5 }}>Belum ada lahan.</p>
+            <p style={{ color: "#8A8A78", fontSize: 13.5 }}>Tidak ada lahan yang punya transaksi di periode ini.</p>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {perLahan.map((row) => (
