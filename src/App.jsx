@@ -1178,7 +1178,7 @@ function Dashboard({ username, onLogout }) {
                 display: "inline-flex", alignItems: "center", gap: 7, background: "rgba(255,255,255,0.1)",
                 padding: "6px 12px", borderRadius: 20,
               }}>
-                <span style={{ fontSize: 12, opacity: 0.85 }}>Average Sewa</span>
+                <span style={{ fontSize: 12, opacity: 0.85 }}>Average</span>
                 <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, fontWeight: 700, color: "#D9D4C2" }}>
                   <Amt>{rupiah(rataRataSewa100Ru)}</Amt>/100ru/thn
                 </span>
