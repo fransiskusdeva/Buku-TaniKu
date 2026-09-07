@@ -129,9 +129,15 @@ function rupiah(n) {
   return "Rp " + v.toLocaleString("id-ID");
 }
 
+function localDateStr(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 function todayStr() {
-  const d = new Date();
-  return d.toISOString().slice(0, 10);
+  return localDateStr(new Date());
 }
 
 function uid(prefix) {
@@ -450,11 +456,10 @@ const BlurContext = React.createContext(false);
 function useBlur() { return React.useContext(BlurContext); }
 function Amt({ children, style }) {
   const hide = useBlur();
-  return (
-    <span style={hide ? { ...style, filter: "blur(7px)", userSelect: "none", transition: "filter .15s" } : style}>
-      {children}
-    </span>
-  );
+  if (hide) {
+    return <span style={{ ...style, letterSpacing: 1, userSelect: "none" }}>••••••</span>;
+  }
+  return <span style={style}>{children}</span>;
 }
 
 // ---------- Login ----------
@@ -622,24 +627,6 @@ function Dashboard({ username, onLogout }) {
   const [selectedLahan, setSelectedLahan] = useState("all"); // 'all' or lahan id
   const [dashPage, setDashPage] = useState(0); // 0 = dashboard, 1 = riwayat transaksi
   const touchStartXRef = React.useRef(null);
-  const page1Ref = React.useRef(null);
-  const page2Ref = React.useRef(null);
-  const [pageHeight, setPageHeight] = useState(null);
-
-  useEffect(() => {
-    const el1 = page1Ref.current, el2 = page2Ref.current;
-    if (!el1 || !el2) return;
-    const update = () => {
-      const active = dashPage === 0 ? el1 : el2;
-      setPageHeight(active.scrollHeight);
-    };
-    update();
-    const ro1 = new ResizeObserver(update);
-    const ro2 = new ResizeObserver(update);
-    ro1.observe(el1);
-    ro2.observe(el2);
-    return () => { ro1.disconnect(); ro2.disconnect(); };
-  }, [dashPage]);
 
   function handleSwipeStart(e) {
     touchStartXRef.current = e.touches[0].clientX;
@@ -714,7 +701,7 @@ function Dashboard({ username, onLogout }) {
           newAllocs.push({
             id: uid("tx"), kind: "sewa_alokasi", type: "expense", lahanId: l.id,
             categoryId: CAT_SEWA_LAHAN, amount: perYear, cashAmount: 0,
-            alokasiKe: it.index, date: it.date.toISOString().slice(0, 10),
+            alokasiKe: it.index, date: localDateStr(it.date),
             note: `Alokasi biaya sewa tahun ke-${it.index + 1}`,
           });
         }
@@ -858,6 +845,18 @@ function Dashboard({ username, onLogout }) {
       await setStokPupuk(stokPupuk.map((s) => (
         s.id === t.pupukId ? { ...s, stokKg: s.stokKg + t.kg } : s
       )));
+    } else if (t && (t.kind === "sewa_bayar" || t.kind === "sewa_perpanjang") && t.sewaLahanId) {
+      // batalkan setup sewa lahan terkait (dianggap pembayaran ini ga pernah terjadi),
+      // dan hapus alokasi otomatis yang udah kepake jadwal itu karena jadwalnya jadi ga valid
+      await setLahanList(lahanList.map((l) => (
+        l.id === t.sewaLahanId
+          ? { ...l, sewaMulai: null, sewaSampai: null, sewaBasisTanggal: null, sewaBasisNilai: null }
+          : l
+      )));
+      await setTransactions(transactions.filter((x) => (
+        x.id !== id && !(x.kind === "sewa_alokasi" && x.lahanId === t.sewaLahanId)
+      )));
+      return;
     }
     await setTransactions(transactions.filter((t) => t.id !== id));
   }
@@ -970,14 +969,47 @@ function Dashboard({ username, onLogout }) {
     }
   }
 
-  async function saveLahan({ id, name, luasRu, sewaMulai, sewaSampai, totalBiayaSewa, sewaBaru }) {
-    const isSewa = !!(totalBiayaSewa && totalBiayaSewa > 0 && sewaMulai && sewaSampai);
-    const patch = {
-      name, luasRu: luasRu || null, sewaSampai: sewaSampai || null,
-      sewaMulai: isSewa ? sewaMulai : null,
-      sewaBasisTanggal: isSewa ? (sewaBaru ? sewaMulai : todayStr()) : null,
-      sewaBasisNilai: isSewa ? totalBiayaSewa : null,
-    };
+  async function saveLahan({ id, name, luasRu, sewaMulai, sewaSampai, totalBiayaSewa, sewaBaru, sewaPerpanjang, tambahTahun, tambahanBayar }) {
+    let patch = { name, luasRu: luasRu || null };
+    let cashTx = null;
+    const existing = id ? lahanList.find((l) => l.id === id) : null;
+
+    if (sewaPerpanjang && existing && existing.sewaMulai && existing.sewaSampai && tambahTahun > 0) {
+      const sisaSekarang = sisaAsetSewa(existing, transactions);
+      const newBasisNilai = sisaSekarang + (tambahanBayar || 0);
+      const newEnd = new Date(existing.sewaSampai + "T00:00:00");
+      newEnd.setFullYear(newEnd.getFullYear() + tambahTahun);
+      patch = {
+        ...patch,
+        sewaSampai: localDateStr(newEnd),
+        sewaBasisTanggal: todayStr(),
+        sewaBasisNilai: newBasisNilai,
+      };
+      if (tambahanBayar > 0) {
+        cashTx = {
+          id: uid("tx"), kind: "sewa_perpanjang", type: "expense", lahanId: null,
+          categoryId: CAT_SEWA_LAHAN, amount: tambahanBayar, cashAmount: tambahanBayar,
+          sewaLahanId: id, date: todayStr(), note: `Perpanjang sewa ${name} +${tambahTahun} tahun`,
+        };
+      }
+    } else {
+      const isSewa = !!(totalBiayaSewa && totalBiayaSewa > 0 && sewaMulai && sewaSampai);
+      patch = {
+        ...patch,
+        sewaSampai: sewaSampai || null,
+        sewaMulai: isSewa ? sewaMulai : null,
+        sewaBasisTanggal: isSewa ? (sewaBaru ? sewaMulai : todayStr()) : null,
+        sewaBasisNilai: isSewa ? totalBiayaSewa : null,
+      };
+      if (isSewa && sewaBaru) {
+        cashTx = {
+          id: uid("tx"), kind: "sewa_bayar", type: "expense", lahanId: null,
+          categoryId: CAT_SEWA_LAHAN, amount: totalBiayaSewa, cashAmount: totalBiayaSewa,
+          sewaLahanId: id || null, date: todayStr(), note: `Bayar sewa ${name}`,
+        };
+      }
+    }
+
     let targetId = id;
     if (id) {
       await setLahanList(lahanList.map((l) => (l.id === id ? { ...l, ...patch } : l)));
@@ -985,12 +1017,8 @@ function Dashboard({ username, onLogout }) {
       targetId = uid("lahan");
       await setLahanList([...lahanList, { ...patch, id: targetId }]);
     }
-    if (isSewa && sewaBaru) {
-      await setTransactions([...transactions, {
-        id: uid("tx"), kind: "sewa_bayar", type: "expense", lahanId: null,
-        categoryId: CAT_SEWA_LAHAN, amount: totalBiayaSewa, cashAmount: totalBiayaSewa,
-        sewaLahanId: targetId, date: todayStr(), note: `Bayar sewa ${name}`,
-      }]);
+    if (cashTx) {
+      await setTransactions([...transactions, { ...cashTx, sewaLahanId: targetId }]);
     }
   }
 
@@ -1064,6 +1092,7 @@ function Dashboard({ username, onLogout }) {
         ::selection { background: ${GOLD}; color: ${FOREST}; }
         .animate-spin { animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         button:focus-visible, input:focus-visible, select:focus-visible {
           outline: 2px solid ${GOLD}; outline-offset: 2px;
         }
@@ -1112,7 +1141,7 @@ function Dashboard({ username, onLogout }) {
               padding: "6px 12px", borderRadius: 20,
             }}>
               <PiggyBank size={14} color={GOLD} />
-              <span style={{ fontSize: 12, opacity: 0.85 }}>Saldo Kas</span>
+              <span style={{ fontSize: 12, opacity: 0.85 }}>Saldo</span>
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13.5, fontWeight: 700, color: GOLD }}>
                 <Amt>{rupiah(saldoKas)}</Amt>
               </span>
@@ -1124,7 +1153,7 @@ function Dashboard({ username, onLogout }) {
                 padding: "6px 12px", borderRadius: 20,
               }}>
                 <Landmark size={14} color="#8FCB6A" />
-                <span style={{ fontSize: 12, opacity: 0.85 }}>Sisa Aset Sewa</span>
+                <span style={{ fontSize: 12, opacity: 0.85 }}>Sisa Sewa</span>
                 <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13.5, fontWeight: 700, color: "#8FCB6A" }}>
                   <Amt>{rupiah(sisaAsetSewaTampil)}</Amt>
                 </span>
@@ -1137,7 +1166,7 @@ function Dashboard({ username, onLogout }) {
                 padding: "6px 12px", borderRadius: 20,
               }}>
                 <Package size={14} color="#D9D4C2" />
-                <span style={{ fontSize: 12, opacity: 0.85 }}>Nilai Stok Pupuk</span>
+                <span style={{ fontSize: 12, opacity: 0.85 }}>Stok Pupuk</span>
                 <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13.5, fontWeight: 700, color: "#D9D4C2" }}>
                   <Amt>{rupiah(nilaiStokPupuk)}</Amt>
                 </span>
@@ -1149,7 +1178,7 @@ function Dashboard({ username, onLogout }) {
                 display: "inline-flex", alignItems: "center", gap: 7, background: "rgba(255,255,255,0.1)",
                 padding: "6px 12px", borderRadius: 20,
               }}>
-                <span style={{ fontSize: 12, opacity: 0.85 }}>Rata-rata Sewa</span>
+                <span style={{ fontSize: 12, opacity: 0.85 }}>Average Sewa</span>
                 <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, fontWeight: 700, color: "#D9D4C2" }}>
                   <Amt>{rupiah(rataRataSewa100Ru)}</Amt>/100ru/thn
                 </span>
@@ -1226,15 +1255,11 @@ function Dashboard({ username, onLogout }) {
           <div
             onTouchStart={handleSwipeStart}
             onTouchEnd={handleSwipeEnd}
-            style={{ overflow: "hidden", height: pageHeight ? `${pageHeight}px` : "auto", transition: "height .25s ease" }}
+            key={dashPage}
+            style={{ animation: "fadeIn .18s ease", padding: "0 20px" }}
           >
-            <div style={{
-              display: "flex", width: "200%", alignItems: "flex-start",
-              transform: `translateX(${dashPage === 0 ? "0%" : "-50%"})`,
-              transition: "transform .25s ease",
-            }}>
-              {/* Halaman 1: Dashboard */}
-              <div ref={page1Ref} style={{ width: "50%", flexShrink: 0, boxSizing: "border-box", padding: "0 20px" }}>
+            {dashPage === 0 && (
+              <div>
                 {/* Summary cards */}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 8 }}>
                   <SummaryCard icon={<TrendingUp size={16} color={GREEN} />} label="Pemasukan" value={totals.income} color={GREEN}
@@ -1300,9 +1325,10 @@ function Dashboard({ username, onLogout }) {
                   </div>
                 )}
               </div>
+            )}
 
-              {/* Halaman 2: Riwayat Transaksi */}
-              <div ref={page2Ref} style={{ width: "50%", flexShrink: 0, boxSizing: "border-box", padding: "0 20px" }}>
+            {dashPage === 1 && (
+              <div>
                 <button
                   onClick={() => setDashPage(0)}
                   style={{
@@ -1360,6 +1386,7 @@ function Dashboard({ username, onLogout }) {
                             {t.kind === "pupuk_usage" && ` · ${t.kg}kg ${t.pupukNama} → Pupuk ${rupiah(t.pupukCost)} + Kerja ${rupiah(t.laborCost)}`}
                             {t.kind === "pupuk_purchase" && ` · +${t.kg}kg ${t.pupukNama} ke stok`}
                             {t.kind === "sewa_bayar" && ` · pembayaran sewa`}
+                            {t.kind === "sewa_perpanjang" && ` · perpanjangan sewa`}
                             {!t.kind && t.note ? ` · ${t.note}` : ""}
                           </div>
                         </div>
@@ -1370,19 +1397,17 @@ function Dashboard({ username, onLogout }) {
                           }}>
                             {t.type === "income" ? "+" : "-"}<Amt>{rupiah(t.amount)}</Amt>
                           </span>
-                          {t.kind !== "sewa_alokasi" && t.kind !== "sewa_bayar" && (
+                          {t.kind !== "sewa_alokasi" && t.kind !== "sewa_bayar" && t.kind !== "sewa_perpanjang" && (
                             <IconBtn onClick={() => openEditFor(t)} title="Edit"><Pencil size={14} /></IconBtn>
                           )}
-                          {t.kind !== "sewa_alokasi" && (
-                            <IconBtn onClick={() => requestDeleteTx(t.id)} title="Hapus" danger><Trash2 size={14} /></IconBtn>
-                          )}
+                          <IconBtn onClick={() => requestDeleteTx(t.id)} title={t.kind === "sewa_alokasi" ? "Hapus (akan dibuat ulang otomatis kalau masih jatuh tempo)" : "Hapus"} danger><Trash2 size={14} /></IconBtn>
                         </div>
                       </div>
                     ))}
                   </div>
                 )}
               </div>
-            </div>
+            )}
 
             {/* indikator halaman */}
             <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 16 }}>
@@ -1533,14 +1558,20 @@ function Dashboard({ username, onLogout }) {
         />
       )}
 
-      {confirmDeleteId && (
-        <ConfirmModal
-          title="Hapus Transaksi?"
-          message="Catatan ini akan dihapus permanen dan tidak bisa dikembalikan. Kalau ini transaksi pupuk, stok akan disesuaikan otomatis."
-          onConfirm={confirmDelete}
-          onCancel={() => setConfirmDeleteId(null)}
-        />
-      )}
+      {confirmDeleteId && (() => {
+        const t = transactions.find((x) => x.id === confirmDeleteId);
+        const isSewaSetup = t && (t.kind === "sewa_bayar" || t.kind === "sewa_perpanjang");
+        return (
+          <ConfirmModal
+            title="Hapus Transaksi?"
+            message={isSewaSetup
+              ? "Ini transaksi setup sewa — menghapusnya akan MERESET data sewa lahan terkait (tanggal, nilai) dan menghapus semua alokasi otomatis yang sudah kepake jadwal ini. Yakin?"
+              : "Catatan ini akan dihapus permanen dan tidak bisa dikembalikan. Kalau ini transaksi pupuk, stok akan disesuaikan otomatis."}
+            onConfirm={confirmDelete}
+            onCancel={() => setConfirmDeleteId(null)}
+          />
+        );
+      })()}
 
       {showRecordModal && (
         <RecordModal
@@ -1686,6 +1717,9 @@ function LahanModal({ onClose, lahanList, transactions, onSave, onArchive, onRes
   const [sewaSampai, setSewaSampai] = useState("");
   const [totalBiayaSewa, setTotalBiayaSewa] = useState("");
   const [sewaBaru, setSewaBaru] = useState(false);
+  const [sewaPerpanjang, setSewaPerpanjang] = useState(false);
+  const [tambahTahun, setTambahTahun] = useState("");
+  const [tambahanBayar, setTambahanBayar] = useState("");
 
   const active = lahanList.filter((l) => !l.archived);
   const archived = lahanList.filter((l) => l.archived);
@@ -1711,6 +1745,9 @@ function LahanModal({ onClose, lahanList, transactions, onSave, onArchive, onRes
     setSewaSampai(l?.sewaSampai || "");
     setTotalBiayaSewa(l?.sewaBasisNilai ? String(l.sewaBasisNilai) : "");
     setSewaBaru(false);
+    setSewaPerpanjang(false);
+    setTambahTahun("");
+    setTambahanBayar("");
   }
 
   async function submit() {
@@ -1722,9 +1759,13 @@ function LahanModal({ onClose, lahanList, transactions, onSave, onArchive, onRes
       sewaSampai: sewaSampai || null,
       totalBiayaSewa: totalBiayaSewa ? parseFloat(totalBiayaSewa) : 0,
       sewaBaru,
+      sewaPerpanjang,
+      tambahTahun: tambahTahun ? parseInt(tambahTahun, 10) : 0,
+      tambahanBayar: tambahanBayar ? parseFloat(tambahanBayar) : 0,
     });
     setEditing(null);
     setName(""); setLuasRu(""); setSewaMulai(""); setSewaSampai(""); setTotalBiayaSewa(""); setSewaBaru(false);
+    setSewaPerpanjang(false); setTambahTahun(""); setTambahanBayar("");
   }
 
   return (
@@ -1814,33 +1855,70 @@ function LahanModal({ onClose, lahanList, transactions, onSave, onArchive, onRes
             <FieldLabel>Luas (ru, opsional)</FieldLabel>
             <input style={inputStyle} type="number" min="0" value={luasRu} onChange={(e) => setLuasRu(e.target.value)} placeholder="mis. 200" />
           </div>
-          <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-            <div style={{ flex: 1 }}>
-              <FieldLabel>Awal Sewa</FieldLabel>
-              <input style={inputStyle} type="date" value={sewaMulai} onChange={(e) => setSewaMulai(e.target.value)} />
+
+          {editing?.sewaMulai && editing?.sewaSampai && (
+            <div style={{ display: "flex", gap: 16, marginBottom: 14 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <input type="checkbox" checked={sewaBaru} onChange={(e) => { setSewaBaru(e.target.checked); if (e.target.checked) setSewaPerpanjang(false); }} style={{ width: 16, height: 16 }} />
+                <span style={{ fontSize: 13.5, fontWeight: 600, color: "#3A3A2E" }}>Sewa Baru</span>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <input type="checkbox" checked={sewaPerpanjang} onChange={(e) => { setSewaPerpanjang(e.target.checked); if (e.target.checked) setSewaBaru(false); }} style={{ width: 16, height: 16 }} />
+                <span style={{ fontSize: 13.5, fontWeight: 600, color: "#3A3A2E" }}>Perpanjang</span>
+              </label>
             </div>
-            <div style={{ flex: 1 }}>
-              <FieldLabel>Sewa Sampai</FieldLabel>
-              <input style={inputStyle} type="date" value={sewaSampai} onChange={(e) => setSewaSampai(e.target.value)} />
-            </div>
-          </div>
-          <div style={{ marginBottom: 10 }}>
-            <FieldLabel>Total Biaya Sewa (Rp)</FieldLabel>
-            <input style={inputStyle} type="number" min="0" value={totalBiayaSewa} onChange={(e) => setTotalBiayaSewa(e.target.value)} placeholder="0" />
-            <p style={{ fontSize: 11.5, color: "#8A8A78", marginTop: 4, marginBottom: 0 }}>
-              Kosongkan / isi 0 kalau lahan sendiri (bukan sewa). Kalau lahan ini sewa yang sudah berjalan, isi sisa nilai sewa yang belum kepake.
-            </p>
-          </div>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18, cursor: "pointer" }}>
-            <input type="checkbox" checked={sewaBaru} onChange={(e) => setSewaBaru(e.target.checked)} style={{ width: 16, height: 16 }} />
-            <span style={{ fontSize: 13.5, fontWeight: 600, color: "#3A3A2E" }}>Sewa baru</span>
-          </label>
-          {totalBiayaSewa && parseFloat(totalBiayaSewa) > 0 && (
-            <p style={{ fontSize: 11.5, color: "#8A8A78", marginTop: -12, marginBottom: 16 }}>
-              {sewaBaru
-                ? "Dicentang: Saldo Kas akan langsung kepotong sebesar Total Biaya Sewa di atas."
-                : "Tidak dicentang: Kas tidak kepotong, ini cuma menyeting sisa nilai sewa yang belum kepake."}
-            </p>
+          )}
+
+          {!sewaPerpanjang ? (
+            <>
+              <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+                <div style={{ flex: 1 }}>
+                  <FieldLabel>Awal Sewa</FieldLabel>
+                  <input style={inputStyle} type="date" value={sewaMulai} onChange={(e) => setSewaMulai(e.target.value)} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <FieldLabel>Sewa Sampai</FieldLabel>
+                  <input style={inputStyle} type="date" value={sewaSampai} onChange={(e) => setSewaSampai(e.target.value)} />
+                </div>
+              </div>
+              <div style={{ marginBottom: 10 }}>
+                <FieldLabel>Total Biaya Sewa (Rp)</FieldLabel>
+                <input style={inputStyle} type="number" min="0" value={totalBiayaSewa} onChange={(e) => setTotalBiayaSewa(e.target.value)} placeholder="0" />
+                <p style={{ fontSize: 11.5, color: "#8A8A78", marginTop: 4, marginBottom: 0 }}>
+                  Kosongkan / isi 0 kalau lahan sendiri (bukan sewa). Kalau lahan ini sewa yang sudah berjalan, isi sisa nilai sewa yang belum kepake.
+                </p>
+              </div>
+              {!(editing?.sewaMulai && editing?.sewaSampai) && (
+                <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18, cursor: "pointer" }}>
+                  <input type="checkbox" checked={sewaBaru} onChange={(e) => setSewaBaru(e.target.checked)} style={{ width: 16, height: 16 }} />
+                  <span style={{ fontSize: 13.5, fontWeight: 600, color: "#3A3A2E" }}>Sewa baru</span>
+                </label>
+              )}
+              {totalBiayaSewa && parseFloat(totalBiayaSewa) > 0 && (
+                <p style={{ fontSize: 11.5, color: "#8A8A78", marginTop: -12, marginBottom: 16 }}>
+                  {sewaBaru
+                    ? "Dicentang: Saldo Kas akan langsung kepotong sebesar Total Biaya Sewa di atas."
+                    : "Tidak dicentang: Kas tidak kepotong, ini cuma menyeting sisa nilai sewa yang belum kepake."}
+                </p>
+              )}
+            </>
+          ) : (
+            <>
+              <div style={{ marginBottom: 14 }}>
+                <FieldLabel>Tambah Berapa Tahun</FieldLabel>
+                <input style={inputStyle} type="number" min="1" value={tambahTahun} onChange={(e) => setTambahTahun(e.target.value)} placeholder="mis. 3" />
+                <p style={{ fontSize: 11.5, color: "#8A8A78", marginTop: 4, marginBottom: 0 }}>
+                  Sewa Sampai bakal digeser maju sebanyak ini dari tanggal sekarang ({editing?.sewaSampai}).
+                </p>
+              </div>
+              <div style={{ marginBottom: 18 }}>
+                <FieldLabel>Tambahan Pembayaran (Rp)</FieldLabel>
+                <input style={inputStyle} type="number" min="0" value={tambahanBayar} onChange={(e) => setTambahanBayar(e.target.value)} placeholder="0" />
+                <p style={{ fontSize: 11.5, color: "#8A8A78", marginTop: 4, marginBottom: 0 }}>
+                  Digabung otomatis sama sisa sewa yang belum kepake. Saldo Kas kepotong sebesar ini.
+                </p>
+              </div>
+            </>
           )}
           <div style={{ display: "flex", gap: 8 }}>
             <PrimaryBtn onClick={submit} style={{ flex: 1, justifyContent: "center" }}>Simpan</PrimaryBtn>
