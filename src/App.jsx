@@ -77,13 +77,18 @@ function computeSewaSchedule(l) {
   const basisDate = new Date(l.sewaBasisTanggal + "T00:00:00");
   const yearsRemaining = Math.max(1, Math.round((end - basisDate) / YEAR_MS));
   const perYear = l.sewaBasisNilai / yearsRemaining;
-  const items = [];
+  // hitung semua "ulang tahun sewa" dari awal sampai sebelum tanggal habis
+  const allAnniversaries = [];
   for (let k = 0; k < 200; k++) {
     const anniv = new Date(start);
     anniv.setFullYear(start.getFullYear() + k);
     if (anniv >= end) break;
-    if (anniv >= basisDate) items.push({ index: k, date: anniv });
+    allAnniversaries.push({ index: k, date: anniv });
   }
+  // ambil N terakhir (sebanyak yearsRemaining) sebagai jadwal yang masih harus dibebankan —
+  // ini yang bikin sisa sewa di tahun terakhir tetap kepotong walau ulang tahunnya sudah lewat
+  // dari tanggal basis (mis. setup dilakukan di tengah tahun sewa yang sedang berjalan)
+  const items = allAnniversaries.slice(-yearsRemaining);
   return { perYear, items };
 }
 
@@ -399,6 +404,26 @@ const inputStyle = {
   border: "1px solid rgba(31,46,29,0.18)", fontSize: 15, background: "#fff",
   fontFamily: "'Public Sans', sans-serif", color: INK, boxSizing: "border-box",
 };
+
+// input angka dengan pemisah ribuan otomatis (titik), buat kurangi resiko salah ketik nominal
+function NumberInput({ value, onChange, placeholder, style, autoFocus }) {
+  function handleChange(e) {
+    const raw = e.target.value.replace(/[^\d]/g, "");
+    onChange(raw.replace(/^0+(?=\d)/, ""));
+  }
+  const display = value ? Number(value).toLocaleString("id-ID") : "";
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      style={style || inputStyle}
+      value={display}
+      onChange={handleChange}
+      placeholder={placeholder}
+      autoFocus={autoFocus}
+    />
+  );
+}
 
 // ---------- Petak (plot) selector tile ----------
 
@@ -1178,7 +1203,7 @@ function Dashboard({ username, onLogout }) {
                 display: "inline-flex", alignItems: "center", gap: 7, background: "rgba(255,255,255,0.1)",
                 padding: "6px 12px", borderRadius: 20,
               }}>
-                <span style={{ fontSize: 12, opacity: 0.85 }}>Average</span>
+                <span style={{ fontSize: 12, opacity: 0.85 }}>Average Sewa</span>
                 <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, fontWeight: 700, color: "#D9D4C2" }}>
                   <Amt>{rupiah(rataRataSewa100Ru)}</Amt>/100ru/thn
                 </span>
@@ -1689,7 +1714,7 @@ function TxModal({ onClose, onSave, lahanList, categories, initial, defaultLahan
 
       <div style={{ marginBottom: 14 }}>
         <FieldLabel>Jumlah (Rp)</FieldLabel>
-        <input style={inputStyle} type="number" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" />
+        <NumberInput value={amount} onChange={setAmount} placeholder="0" />
       </div>
 
       <div style={{ marginBottom: 14 }}>
@@ -1853,7 +1878,7 @@ function LahanModal({ onClose, lahanList, transactions, onSave, onArchive, onRes
           </div>
           <div style={{ marginBottom: 14 }}>
             <FieldLabel>Luas (ru, opsional)</FieldLabel>
-            <input style={inputStyle} type="number" min="0" value={luasRu} onChange={(e) => setLuasRu(e.target.value)} placeholder="mis. 200" />
+            <NumberInput value={luasRu} onChange={setLuasRu} placeholder="mis. 200" />
           </div>
 
           {editing?.sewaMulai && editing?.sewaSampai && (
@@ -1883,7 +1908,7 @@ function LahanModal({ onClose, lahanList, transactions, onSave, onArchive, onRes
               </div>
               <div style={{ marginBottom: 10 }}>
                 <FieldLabel>Total Biaya Sewa (Rp)</FieldLabel>
-                <input style={inputStyle} type="number" min="0" value={totalBiayaSewa} onChange={(e) => setTotalBiayaSewa(e.target.value)} placeholder="0" />
+                <NumberInput value={totalBiayaSewa} onChange={setTotalBiayaSewa} placeholder="0" />
                 <p style={{ fontSize: 11.5, color: "#8A8A78", marginTop: 4, marginBottom: 0 }}>
                   Kosongkan / isi 0 kalau lahan sendiri (bukan sewa). Kalau lahan ini sewa yang sudah berjalan, isi sisa nilai sewa yang belum kepake.
                 </p>
@@ -1906,14 +1931,14 @@ function LahanModal({ onClose, lahanList, transactions, onSave, onArchive, onRes
             <>
               <div style={{ marginBottom: 14 }}>
                 <FieldLabel>Tambah Berapa Tahun</FieldLabel>
-                <input style={inputStyle} type="number" min="1" value={tambahTahun} onChange={(e) => setTambahTahun(e.target.value)} placeholder="mis. 3" />
+                <NumberInput value={tambahTahun} onChange={setTambahTahun} placeholder="mis. 3" />
                 <p style={{ fontSize: 11.5, color: "#8A8A78", marginTop: 4, marginBottom: 0 }}>
                   Sewa Sampai bakal digeser maju sebanyak ini dari tanggal sekarang ({editing?.sewaSampai}).
                 </p>
               </div>
               <div style={{ marginBottom: 18 }}>
                 <FieldLabel>Tambahan Pembayaran (Rp)</FieldLabel>
-                <input style={inputStyle} type="number" min="0" value={tambahanBayar} onChange={(e) => setTambahanBayar(e.target.value)} placeholder="0" />
+                <NumberInput value={tambahanBayar} onChange={setTambahanBayar} placeholder="0" />
                 <p style={{ fontSize: 11.5, color: "#8A8A78", marginTop: 4, marginBottom: 0 }}>
                   Digabung otomatis sama sisa sewa yang belum kepake. Saldo Kas kepotong sebesar ini.
                 </p>
@@ -2170,7 +2195,7 @@ function BeliPupukModal({ onClose, stokPupuk, onSave, initial }) {
         </div>
         <div style={{ flex: 1 }}>
           <FieldLabel>Total Harga (Rp)</FieldLabel>
-          <input style={inputStyle} type="number" min="0" value={totalHarga} onChange={(e) => setTotalHarga(e.target.value)} placeholder="0" />
+          <NumberInput value={totalHarga} onChange={setTotalHarga} placeholder="0" />
         </div>
       </div>
 
@@ -2248,7 +2273,7 @@ function PemupukanModal({ onClose, stokPupuk, lahanList, onSave, defaultLahan, i
 
       <div style={{ marginBottom: 14 }}>
         <FieldLabel>Biaya Kerja Pemupukan (Rp, opsional)</FieldLabel>
-        <input style={inputStyle} type="number" min="0" value={laborCost} onChange={(e) => setLaborCost(e.target.value)} placeholder="0" />
+        <NumberInput value={laborCost} onChange={setLaborCost} placeholder="0" />
       </div>
 
       <div style={{ marginBottom: 14 }}>
@@ -2295,7 +2320,7 @@ function SaldoModal({ onClose, onSave, initial }) {
 
       <div style={{ marginBottom: 14 }}>
         <FieldLabel>Jumlah (Rp)</FieldLabel>
-        <input style={inputStyle} type="number" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" autoFocus />
+        <NumberInput value={amount} onChange={setAmount} placeholder="0" autoFocus />
       </div>
 
       <div style={{ marginBottom: 14 }}>
