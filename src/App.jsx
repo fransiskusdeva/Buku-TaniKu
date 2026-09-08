@@ -95,12 +95,13 @@ function computeSewaSchedule(l) {
 // total nilai sewa yang sudah "kepake" (dibiayakan) sejak titik basis, dari riwayat transaksi
 function sewaTerpakaiSejakBasis(l, transactions) {
   if (!l || !l.sewaBasisTanggal) return 0;
-  const basisStr = l.sewaBasisTanggal;
+  const { items } = computeSewaSchedule(l);
+  const validIdx = new Set(items.map((it) => it.index));
   const alokasi = transactions
-    .filter((t) => t.kind === "sewa_alokasi" && t.lahanId === l.id && t.date >= basisStr)
+    .filter((t) => t.kind === "sewa_alokasi" && t.lahanId === l.id && validIdx.has(t.alokasiKe))
     .reduce((s, t) => s + t.amount, 0);
   const pengembalian = transactions
-    .filter((t) => t.categoryId === CAT_PENGEMBALIAN_SEWA && t.lahanId === l.id && t.date >= basisStr)
+    .filter((t) => t.categoryId === CAT_PENGEMBALIAN_SEWA && t.lahanId === l.id && t.date >= l.sewaBasisTanggal)
     .reduce((s, t) => s + t.amount, 0);
   return alokasi + pengembalian;
 }
@@ -1397,12 +1398,12 @@ function Dashboard({ username, onLogout }) {
                                 Alokasi otomatis
                               </span>
                             )}
-                            {selectedLahan === "all" && (
+                            {selectedLahan === "all" && (lahanMap[t.lahanId] || lahanMap[t.sewaLahanId]) && (
                               <span style={{
                                 fontSize: 10.5, background: "#EFEAD9", color: "#5A5A4A",
                                 padding: "2px 7px", borderRadius: 20, fontWeight: 600,
                               }}>
-                                {lahanMap[t.lahanId]?.name || "?"}
+                                {(lahanMap[t.lahanId] || lahanMap[t.sewaLahanId]).name}
                               </span>
                             )}
                           </div>
