@@ -70,14 +70,11 @@ const DAY_MS = 86400000;
 const YEAR_MS = 365.25 * DAY_MS;
 
 // hitung jadwal alokasi biaya sewa: kapan & berapa tiap "ulang tahun sewa" dari titik basis nilai yang belum kepake
-function computeSewaSchedule(l) {
-  if (!l || !l.sewaMulai || !l.sewaSampai || !l.sewaBasisTanggal || !l.sewaBasisNilai) return { perYear: 0, items: [] };
+function computeSewaSchedule(l, transactions) {
+  if (!l || !l.sewaMulai || !l.sewaSampai || !l.sewaBasisNilai) return { perYear: 0, items: [] };
   const start = new Date(l.sewaMulai + "T00:00:00");
   const end = new Date(l.sewaSampai + "T00:00:00");
-  const basisDate = new Date(l.sewaBasisTanggal + "T00:00:00");
-  const yearsRemaining = Math.max(1, Math.round((end - basisDate) / YEAR_MS));
-  const perYear = l.sewaBasisNilai / yearsRemaining;
-  // hitung semua "ulang tahun sewa" dari awal sampai sebelum tanggal habis
+  // hitung semua "ulang tahun sewa" dari awal sampai sebelum tanggal habis (total masa kontrak)
   const allAnniversaries = [];
   for (let k = 0; k < 200; k++) {
     const anniv = new Date(start);
@@ -85,9 +82,14 @@ function computeSewaSchedule(l) {
     if (anniv >= end) break;
     allAnniversaries.push({ index: k, date: anniv });
   }
-  // ambil N terakhir (sebanyak yearsRemaining) sebagai jadwal yang masih harus dibebankan —
-  // ini yang bikin sisa sewa di tahun terakhir tetap kepotong walau ulang tahunnya sudah lewat
-  // dari tanggal basis (mis. setup dilakukan di tengah tahun sewa yang sedang berjalan)
+  // tahun yang "tersisa" (belum kepake) = total periode kontrak dikurangi yang sudah pernah
+  // benar-benar tercatat alokasinya — bukan ditebak dari selisih tanggal, biar ga salah anggap
+  // periode yang belum pernah dicatat sebagai "sudah lewat/sudah terhitung"
+  const sudahTercatat = (transactions || []).filter(
+    (t) => t.kind === "sewa_alokasi" && t.lahanId === l.id
+  ).length;
+  const yearsRemaining = Math.max(1, allAnniversaries.length - sudahTercatat);
+  const perYear = l.sewaBasisNilai / yearsRemaining;
   const items = allAnniversaries.slice(-yearsRemaining);
   return { perYear, items };
 }
@@ -95,7 +97,7 @@ function computeSewaSchedule(l) {
 // total nilai sewa yang sudah "kepake" (dibiayakan) sejak titik basis, dari riwayat transaksi
 function sewaTerpakaiSejakBasis(l, transactions) {
   if (!l || !l.sewaBasisTanggal) return 0;
-  const { items } = computeSewaSchedule(l);
+  const { items } = computeSewaSchedule(l, transactions);
   const validIdx = new Set(items.map((it) => it.index));
   const alokasi = transactions
     .filter((t) => t.kind === "sewa_alokasi" && t.lahanId === l.id && validIdx.has(t.alokasiKe))
@@ -112,9 +114,9 @@ function sisaAsetSewa(l, transactions) {
 }
 
 // tarif sewa lahan itu sendiri, Rp per 100 ru per tahun (pakai jadwal berjalan saat ini)
-function tarifSewa100Ru(l) {
+function tarifSewa100Ru(l, transactions) {
   if (!l || !l.luasRu || l.luasRu <= 0) return null;
-  const { perYear } = computeSewaSchedule(l);
+  const { perYear } = computeSewaSchedule(l, transactions);
   if (!perYear) return null;
   return (perYear / l.luasRu) * 100;
 }
@@ -717,7 +719,7 @@ function Dashboard({ username, onLogout }) {
     const today = new Date();
     const newAllocs = [];
     lahanList.forEach((l) => {
-      const { perYear, items } = computeSewaSchedule(l);
+      const { perYear, items } = computeSewaSchedule(l, transactions);
       if (!perYear || items.length === 0) return;
       const existingIdx = new Set(
         transactions.filter((t) => t.kind === "sewa_alokasi" && t.lahanId === l.id).map((t) => t.alokasiKe)
@@ -793,20 +795,20 @@ function Dashboard({ username, onLogout }) {
     if (selectedLahan === "all") return null;
     const l = lahanMap[selectedLahan];
     if (!l || !l.sewaMulai) return null;
-    return tarifSewa100Ru(l);
-  }, [selectedLahan, lahanMap]);
+    return tarifSewa100Ru(l, transactions);
+  }, [selectedLahan, lahanMap, transactions]);
 
   const rataRataSewa100Ru = useMemo(() => {
     let totalPerYear = 0, totalLuas = 0;
     sewaAktifList.forEach((l) => {
       if (!l.luasRu || l.luasRu <= 0) return;
-      const { perYear } = computeSewaSchedule(l);
+      const { perYear } = computeSewaSchedule(l, transactions);
       totalPerYear += perYear;
       totalLuas += l.luasRu;
     });
     if (totalLuas <= 0) return null;
     return (totalPerYear / totalLuas) * 100;
-  }, [sewaAktifList]);
+  }, [sewaAktifList, transactions]);
 
   const totals = useMemo(() => {
     let income = 0, expenseCash = 0, expenseFull = 0;
