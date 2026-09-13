@@ -97,10 +97,8 @@ function computeSewaSchedule(l, transactions) {
 // total nilai sewa yang sudah "kepake" (dibiayakan) sejak titik basis, dari riwayat transaksi
 function sewaTerpakaiSejakBasis(l, transactions) {
   if (!l || !l.sewaBasisTanggal) return 0;
-  const { items } = computeSewaSchedule(l, transactions);
-  const validIdx = new Set(items.map((it) => it.index));
   const alokasi = transactions
-    .filter((t) => t.kind === "sewa_alokasi" && t.lahanId === l.id && validIdx.has(t.alokasiKe))
+    .filter((t) => t.kind === "sewa_alokasi" && t.lahanId === l.id && t.sewaRegimeId === l.sewaRegimeId)
     .reduce((s, t) => s + t.amount, 0);
   const pengembalian = transactions
     .filter((t) => t.categoryId === CAT_PENGEMBALIAN_SEWA && t.lahanId === l.id && t.date >= l.sewaBasisTanggal)
@@ -729,7 +727,7 @@ function Dashboard({ username, onLogout }) {
           newAllocs.push({
             id: uid("tx"), kind: "sewa_alokasi", type: "expense", lahanId: l.id,
             categoryId: CAT_SEWA_LAHAN, amount: perYear, cashAmount: 0,
-            alokasiKe: it.index, date: localDateStr(it.date),
+            alokasiKe: it.index, date: localDateStr(it.date), sewaRegimeId: l.sewaRegimeId || null,
             note: `Alokasi biaya sewa tahun ke-${it.index + 1}`,
           });
         }
@@ -878,7 +876,7 @@ function Dashboard({ username, onLogout }) {
       // dan hapus alokasi otomatis yang udah kepake jadwal itu karena jadwalnya jadi ga valid
       await setLahanList(lahanList.map((l) => (
         l.id === t.sewaLahanId
-          ? { ...l, sewaMulai: null, sewaSampai: null, sewaBasisTanggal: null, sewaBasisNilai: null }
+          ? { ...l, sewaMulai: null, sewaSampai: null, sewaBasisTanggal: null, sewaBasisNilai: null, sewaRegimeId: null }
           : l
       )));
       await setTransactions(transactions.filter((x) => (
@@ -1012,6 +1010,7 @@ function Dashboard({ username, onLogout }) {
         sewaSampai: localDateStr(newEnd),
         sewaBasisTanggal: todayStr(),
         sewaBasisNilai: newBasisNilai,
+        sewaRegimeId: uid("regime"),
       };
       if (tambahanBayar > 0) {
         cashTx = {
@@ -1028,6 +1027,7 @@ function Dashboard({ username, onLogout }) {
         sewaMulai: isSewa ? sewaMulai : null,
         sewaBasisTanggal: isSewa ? (sewaBaru ? sewaMulai : todayStr()) : null,
         sewaBasisNilai: isSewa ? totalBiayaSewa : null,
+        sewaRegimeId: isSewa ? uid("regime") : null,
       };
       if (isSewa && sewaBaru) {
         cashTx = {
